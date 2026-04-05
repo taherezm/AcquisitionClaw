@@ -176,6 +176,7 @@ async function startAnalysis() {
     companyName: state.companyName,
     industry: state.industry,
     ebitdaRange: state.ebitdaRangeValue || '1m-3m',
+    allowDemoFallback: false,
   };
 
   // Animate processing steps while running pipeline
@@ -616,6 +617,8 @@ function showDashboard(pipelineData) {
     }, 100);
   });
 
+  renderDataQuality(data.dataQuality);
+
   // Missing diligence items
   const missingEl = $('#missing-items');
   const missingTitle = $('#missing-title');
@@ -676,6 +679,88 @@ function renderAnalyticsStudio(data) {
   renderSignalMap(data);
   renderConcentrationMonitor(data);
   renderDebtLadder(data);
+}
+
+function renderDataQuality(dataQuality) {
+  const summaryEl = $('#quality-summary');
+  const docsEl = $('#quality-documents');
+  const findingsEl = $('#quality-findings');
+  const missingEl = $('#quality-missing');
+
+  if (!summaryEl || !docsEl || !findingsEl || !missingEl) return;
+
+  if (!dataQuality) {
+    summaryEl.innerHTML = '<div class="empty-state">No ingestion quality metrics available</div>';
+    docsEl.innerHTML = '';
+    findingsEl.innerHTML = '';
+    missingEl.innerHTML = '';
+    return;
+  }
+
+  const extraction = dataQuality.extractionConfidence || {};
+  const adjustment = dataQuality.confidenceAdjustment || {};
+  summaryEl.innerHTML = `
+    <div class="quality-metric">
+      <div class="quality-metric-label">Extraction Confidence</div>
+      <div class="quality-metric-value">${extraction.averagePct ?? 0}%</div>
+      <div class="quality-metric-note">${extraction.documentCount || 0} normalized document${extraction.documentCount === 1 ? '' : 's'} in scoring</div>
+    </div>
+    <div class="quality-metric">
+      <div class="quality-metric-label">Validation Status</div>
+      <div class="quality-metric-value">${formatValidationStatus(dataQuality.validationStatus)}</div>
+      <div class="quality-metric-note">${dataQuality.summary || 'No validation summary available.'}</div>
+    </div>
+    <div class="quality-metric">
+      <div class="quality-metric-label">Confidence Adjustment</div>
+      <div class="quality-metric-value">${formatConfidenceAdjustment(adjustment.delta)}</div>
+      <div class="quality-metric-note">${formatAdjustmentNote(adjustment)}</div>
+    </div>
+  `;
+
+  docsEl.innerHTML = (dataQuality.documents || []).length > 0
+    ? dataQuality.documents.map((doc) => `
+      <div class="quality-document">
+        <div>
+          <h4>${doc.label}</h4>
+          <div class="quality-document-meta">${doc.source}${doc.warningCount ? ` • ${doc.warningCount} extraction warning${doc.warningCount === 1 ? '' : 's'}` : ''}</div>
+        </div>
+        <div class="quality-doc-badges">
+          <span class="quality-badge ${doc.confidenceLabel}">${doc.confidencePct}% confidence</span>
+          <span class="quality-badge ${doc.source === 'modeled fallback' ? 'low' : 'validated'}">${doc.source}</span>
+        </div>
+      </div>
+    `).join('')
+    : '<div class="empty-state">No normalized documents were available for scoring</div>';
+
+  const findings = [
+    ...(dataQuality.hardErrors || []).slice(0, 3),
+    ...(dataQuality.validationWarnings || []).slice(0, 4),
+  ];
+
+  findingsEl.innerHTML = `
+    <div class="quality-section-label">Validation Findings</div>
+    ${findings.length > 0
+      ? findings.map((finding) => `
+        <div class="quality-finding ${finding.severity}">
+          <span class="quality-finding-tag">${finding.severity === 'hard_error' ? 'hard error' : 'warning'}</span>
+          <span>${finding.message}</span>
+        </div>
+      `).join('')
+      : '<div class="empty-state">Validation did not surface material issues</div>'}
+  `;
+
+  const notes = (dataQuality.missingDataNotes || []).slice(0, 5);
+  missingEl.innerHTML = `
+    <div class="quality-section-label">Missing-Data Notes</div>
+    ${notes.length > 0
+      ? notes.map((note) => `
+        <div class="quality-finding-note">
+          <span class="quality-finding-tag">${note.impact || 'note'}</span>
+          <span>${note.message}</span>
+        </div>
+      `).join('')
+      : '<div class="empty-state">Normalized uploads covered the core validation checks</div>'}
+  `;
 }
 
 function renderGrowthOpportunities(growth) {
@@ -771,6 +856,32 @@ function renderGrowthOpportunities(growth) {
       }
     </div>
   `).join('');
+}
+
+function formatValidationStatus(status) {
+  const labels = {
+    validated: 'Validated',
+    partial: 'Partial',
+    review: 'Review',
+    'hard-error': 'Escalated',
+  };
+  return labels[status] || 'Unknown';
+}
+
+function formatConfidenceAdjustment(delta) {
+  if (typeof delta !== 'number') return '0%';
+  const pct = Math.round(delta * 100);
+  return `${pct > 0 ? '+' : ''}${pct}%`;
+}
+
+function formatAdjustmentNote(adjustment = {}) {
+  if (!adjustment || !Array.isArray(adjustment.reasons) || adjustment.reasons.length === 0) {
+    return 'No confidence downgrade applied.';
+  }
+  const label = adjustment.magnitude && adjustment.magnitude !== 'none'
+    ? `${adjustment.magnitude} downgrade`
+    : 'confidence impact';
+  return `${label} driven by validation and missing-data checks.`;
 }
 
 function renderGrowthDetailBlocks(item) {

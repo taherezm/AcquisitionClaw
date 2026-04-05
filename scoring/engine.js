@@ -156,7 +156,7 @@ function generateOverallExplanation(score, dimensions, confidence, validation) {
 
   if (strong.length > 0) text += ` Strengths: ${strong.join(', ')}.`;
   if (weak.length > 0) text += ` Concerns: ${weak.join(', ')}.`;
-  if (confidence !== 'high') text += ` Note: overall confidence is ${confidence} due to incomplete document coverage.`;
+  if (confidence !== 'high') text += ` Note: overall confidence is ${confidence} due to document coverage and validation limits.`;
   if (validation?.hardErrors?.length) {
     text += ` Validation flagged ${validation.hardErrors.length} hard issue(s) that should be resolved before relying on the score.`;
   } else if (validation?.warnings?.length) {
