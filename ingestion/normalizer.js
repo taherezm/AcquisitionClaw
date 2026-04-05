@@ -1,0 +1,1089 @@
+// ============================================================
+// normalizer.js — Unified normalized financial model
+// ============================================================
+//
+// Assembles extracted document data into a unified financial model,
+// delegates scoring to scoring/engine.js, and produces the final
+// dashboard data object.
+
+import { DOC_TYPES, DOC_TYPE_LABELS, INDUSTRY_BENCHMARKS } from './schemas.js';
+import { runScoringEngine, formatDimensionsForDashboard } from '../scoring/engine.js';
+import { validateFinancialData } from './validator.js';
+
+/**
+ * Aggregate extraction results into the dashboard data model.
+ *
+ * @param {ExtractionResult[]} results  - One per ingested document
+ * @param {Object} context              - { companyName, industry, ebitdaRange }
+ * @returns {Object} Dashboard-ready data
+ */
+export function normalizeToModel(results, context) {
+  const { companyName, industry } = context;
+
+  // Index results by type (prefer highest confidence when duplicates)
+  const byType = indexByType(results);
+  const documentTypes = Object.keys(byType);
+
+  // ---- Build unified financial model ----
+  const timeSeries     = buildTimeSeries(byType);
+  const revenueData    = buildRevenueAndEbitda(byType, timeSeries);
+  const marginsData    = buildMargins(byType, timeSeries);
+  const leverageData   = buildLeverage(byType, timeSeries);
+  const cashflowData   = buildCashflow(byType);
+  const concentration  = buildConcentration(byType);
+  const earningsQuality = buildEarningsQuality(byType);
+  const forecastData   = buildForecast(byType, revenueData);
+  const balanceSheetData = buildBalanceSheetSummary(byType, timeSeries);
+
+  const financialModel = {
+    revenueData, marginsData, leverageData, cashflowData,
+    concentration, earningsQuality, forecastData, balanceSheetData,
+    documentTypes,
+  };
+
+  // ---- Validate normalized data before scoring ----
+  const validation = validateFinancialData({ byType, financialModel });
+
+  // ---- Run scoring engine ----
+  const scoring = runScoringEngine(financialModel, industry, validation);
+
+  // ---- Assemble narrative outputs ----
+  const investmentSummary = generateInvestmentSummary({
+    companyName, revenueData, marginsData, cashflowData,
+    leverageData, concentration, overallScore: scoring.overall.score,
+  });
+  const customerBreakdown = buildCustomerBreakdown(byType);
+  const expenseComposition = buildExpenseComposition(byType, timeSeries);
+  const arAging = buildARAging(byType);
+  const apAging = buildAPAging(byType);
+  const debtProfile = buildDebtProfile(byType);
+  const forecastComparison = buildForecastComparison(byType, revenueData);
+  const workingCapital = buildWorkingCapital(byType, timeSeries);
+  const acquisitionAdvice = generateAcquisitionAdvice({
+    companyName,
+    overall: scoring.overall,
+    dimensions: scoring.dimensions,
+    risks: scoring.risks,
+    missingItems: scoring.missingItems,
+    financialModel,
+    leverageData,
+    concentration,
+    earningsQuality,
+    forecastData,
+    balanceSheetData,
+  });
+  const growthOpportunities = generateGrowthOpportunities({
+    companyName,
+    overall: scoring.overall,
+    dimensions: scoring.dimensions,
+    revenueData,
+    marginsData,
+    leverageData,
+    cashflowData,
+    concentration,
+    earningsQuality,
+    forecastData,
+    customerBreakdown,
+    expenseComposition,
+    arAging,
+    workingCapital,
+    missingItems: scoring.missingItems,
+    availableDocTypes: documentTypes,
+  });
+  const nextSteps = generateNextSteps(scoring.risks, scoring.dimensions);
+  const dataQuality = buildDataQualitySummary(results, validation);
+
+  // ---- Return dashboard-ready object ----
+  return {
+    // Scores
+    overallScore: scoring.overall.score,
+    verdict:      scoring.overall.verdict,
+    description:  scoring.overall.explanation,
+    overallConfidence: scoring.overall.confidence,
+    baseConfidence: scoring.overall.baseConfidence,
+
+    // Sub-scores (with full explanation data)
+    subScores: formatDimensionsForDashboard(scoring.dimensions),
+
+    // Risk flags (backward compat)
+    riskFlags: scoring.flags,
+
+    // New: detailed analysis outputs
+    strengths:    scoring.strengths,
+    risks:        scoring.risks,
+    missingItems: scoring.missingItems,
+
+    // Chart data — core
+    revenue: {
+      labels: revenueData.labels,
+      revenue: revenueData.revenue,
+      ebitda: revenueData.ebitda,
+    },
+    margins: {
+      labels: marginsData.labels,
+      gross: marginsData.gross,
+      ebitda: marginsData.ebitda,
+      net: marginsData.net,
+    },
+    leverage: {
+      labels: leverageData.labels,
+      debtToEbitda: leverageData.debtToEbitda,
+      interestCoverage: leverageData.interestCoverage,
+    },
+    cashflow: {
+      labels: cashflowData.labels,
+      values: cashflowData.values,
+    },
+
+    // Chart data — extended
+    customerBreakdown,
+    expenseComposition,
+    arAging,
+    apAging,
+    debtProfile,
+    forecastComparison,
+    workingCapital,
+
+    // Data quality & validation
+    dataQuality,
+    validation,
+
+    // Narratives
+    investmentSummary,
+    acquisitionAdvice,
+    growthOpportunities,
+    nextSteps,
+  };
+}
+
+// ============================================================
+// Data assembly functions (unchanged in purpose, refined)
+// ============================================================
+
+function indexByType(results) {
+  const map = {};
+  for (const r of results) {
+    if (!r.usable) continue;
+    if (!map[r.docType] || r.confidence > map[r.docType].confidence) {
+      map[r.docType] = r;
+    }
+  }
+  return map;
+}
+
+function buildTimeSeries(byType) {
+  const is = byType[DOC_TYPES.INCOME_STATEMENT];
+  if (is && is.periods.length > 0) return is.periods;
+  const bs = byType[DOC_TYPES.BALANCE_SHEET];
+  if (bs && bs.periods.length > 0) return bs.periods;
+  return ['2021', '2022', '2023', '2024', 'LTM'];
+}
+
+function buildRevenueAndEbitda(byType, periods) {
+  const is  = byType[DOC_TYPES.INCOME_STATEMENT];
+  const qoe = byType[DOC_TYPES.QOE_REPORT];
+  const labels = periods.filter(p => p !== '_single');
+  const revenue = [], ebitda = [];
+
+  for (const yr of labels) {
+    const isD  = is?.data?.[yr];
+    const qoeD = qoe?.data?.[yr];
+    revenue.push(toMillions(isD?.revenue));
+    ebitda.push(toMillions(qoeD?.adjustedEbitda ?? isD?.ebitda));
+  }
+  return { labels, revenue, ebitda };
+}
+
+function buildMargins(byType, periods) {
+  const is = byType[DOC_TYPES.INCOME_STATEMENT];
+  const labels = periods.filter(p => p !== '_single');
+  const gross = [], ebitdaM = [], net = [];
+
+  for (const yr of labels) {
+    const d = is?.data?.[yr];
+    gross.push(d?.grossMargin ?? null);
+    ebitdaM.push(d?.ebitdaMargin ?? null);
+    net.push(d?.netMargin ?? null);
+  }
+  return { labels, gross, ebitda: ebitdaM, net };
+}
+
+function buildLeverage(byType, periods) {
+  const bs = byType[DOC_TYPES.BALANCE_SHEET];
+  const is = byType[DOC_TYPES.INCOME_STATEMENT];
+  const ds = byType[DOC_TYPES.DEBT_SCHEDULE];
+  const labels = periods.filter(p => p !== '_single');
+  const debtToEbitda = [], interestCoverage = [];
+
+  for (const yr of labels) {
+    const debt = ds?.data?._single?.totalDebt ?? bs?.data?.[yr]?.longTermDebt;
+    const ebitda = is?.data?.[yr]?.ebitda;
+    const interest = is?.data?.[yr]?.interestExpense;
+
+    debtToEbitda.push(
+      debt != null && ebitda > 0 ? round(debt / ebitda, 1) : null
+    );
+    interestCoverage.push(
+      ebitda != null && interest > 0 ? round(ebitda / interest, 1) : null
+    );
+  }
+  return { labels, debtToEbitda, interestCoverage };
+}
+
+function buildCashflow(byType) {
+  const cf = byType[DOC_TYPES.CASH_FLOW_STATEMENT];
+  const latest = cf ? cf.periods[cf.periods.length - 1] : null;
+  const d = latest ? cf.data[latest] : null;
+
+  if (d) {
+    return {
+      labels: ['Operating', 'Investing', 'Financing', 'Free Cash Flow'],
+      values: [
+        toMillions(d.operatingCashFlow),
+        toMillions(d.investingCashFlow),
+        toMillions(d.financingCashFlow),
+        toMillions(d.freeCashFlow),
+      ],
+    };
+  }
+  return { labels: ['Operating', 'Investing', 'Financing', 'Free Cash Flow'], values: [0, 0, 0, 0] };
+}
+
+function buildConcentration(byType) {
+  const rb = byType[DOC_TYPES.REVENUE_BREAKDOWN];
+  const ar = byType[DOC_TYPES.AR_AGING];
+  const d  = rb?.data?._single ?? {};
+  const arD = ar?.data?._single ?? {};
+
+  return {
+    topCustomerPct: d.topCustomerPct ?? arD.concentrationTopCustomer ?? null,
+    top3Pct:        d.top3Pct ?? null,
+    top5Pct:        d.top5Pct ?? arD.concentrationTop5 ?? null,
+    customerCount:  d.customerCount ?? null,
+  };
+}
+
+function buildEarningsQuality(byType) {
+  const qoe = byType[DOC_TYPES.QOE_REPORT];
+  if (!qoe) return { addBackPct: null, ownerCompAboveMarket: null };
+
+  const latest = qoe.periods[qoe.periods.length - 1];
+  const d = qoe.data[latest] || {};
+
+  return {
+    addBackPct: d.adjustedEbitda && d.totalAddBacks
+      ? round((d.totalAddBacks / d.adjustedEbitda) * 100, 1) : null,
+    ownerCompAboveMarket: d.ownerCompensation && d.normalizedOwnerComp
+      ? d.ownerCompensation - d.normalizedOwnerComp : null,
+  };
+}
+
+function buildForecast(byType, revenueData) {
+  const proj = byType[DOC_TYPES.PROJECTIONS];
+  if (!proj) return { projectedGrowth: null, historicalCAGR: null, gap: null };
+
+  const d = proj.data[proj.periods[0]] || {};
+  const projectedGrowth = d.projectedGrowthRate ?? null;
+  const revs = revenueData.revenue.filter(r => r != null && r > 0);
+
+  let historicalCAGR = null;
+  if (revs.length >= 2) {
+    historicalCAGR = round((Math.pow(revs[revs.length - 1] / revs[0], 1 / (revs.length - 1)) - 1) * 100, 1);
+  }
+
+  const gap = projectedGrowth != null && historicalCAGR != null
+    ? round(projectedGrowth - historicalCAGR, 1) : null;
+
+  return { projectedGrowth, historicalCAGR, gap };
+}
+
+function buildBalanceSheetSummary(byType, periods) {
+  const bs = byType[DOC_TYPES.BALANCE_SHEET];
+  if (!bs) return { latest: {}, previous: {} };
+
+  const validPeriods = periods.filter(p => p !== '_single' && bs.data[p]);
+  const latestPeriod = validPeriods[validPeriods.length - 1];
+  const prevPeriod   = validPeriods.length > 1 ? validPeriods[validPeriods.length - 2] : null;
+
+  return {
+    latest:   latestPeriod ? bs.data[latestPeriod] : {},
+    previous: prevPeriod ? bs.data[prevPeriod] : {},
+  };
+}
+
+// ============================================================
+// Extended chart data builders
+// ============================================================
+
+function buildCustomerBreakdown(byType) {
+  const rb = byType[DOC_TYPES.REVENUE_BREAKDOWN];
+  const customers = rb?.data?._single?.customers;
+  if (!customers || customers.length === 0) return null;
+  return { customers: customers.map(c => ({ name: c.name, percentage: c.percentage })) };
+}
+
+function buildExpenseComposition(byType, periods) {
+  const is = byType[DOC_TYPES.INCOME_STATEMENT];
+  if (!is) return null;
+  const latest = periods.filter(p => p !== '_single' && is.data[p]).pop();
+  const d = latest ? is.data[latest] : null;
+  if (!d || !d.revenue) return null;
+
+  const cogs = d.cogs || 0;
+  const opex = d.operatingExpenses || 0;
+  const depr = (d.depreciation || 0) + (d.amortization || 0);
+  const interest = d.interestExpense || 0;
+  const other = Math.max(0, d.revenue - d.netIncome - cogs - opex - depr - interest) || 0;
+
+  const labels = [];
+  const values = [];
+  if (cogs > 0) { labels.push('COGS'); values.push(toMillions(cogs)); }
+  if (opex > 0) { labels.push('Operating Expenses'); values.push(toMillions(opex)); }
+  if (depr > 0) { labels.push('D&A'); values.push(toMillions(depr)); }
+  if (interest > 0) { labels.push('Interest'); values.push(toMillions(interest)); }
+  if (other > 0) { labels.push('Tax & Other'); values.push(toMillions(other)); }
+
+  return labels.length > 0 ? { labels, values } : null;
+}
+
+function buildARAging(byType) {
+  const ar = byType[DOC_TYPES.AR_AGING];
+  const d = ar?.data?._single;
+  if (!d) return null;
+
+  return {
+    labels: ['Current', '1–30 Days', '31–60 Days', '61–90 Days', '90+ Days'],
+    values: [d.current || 0, d.days30 || 0, d.days60 || 0, d.days90 || 0, d.days90Plus || 0],
+  };
+}
+
+function buildAPAging(byType) {
+  const ap = byType[DOC_TYPES.AP_AGING];
+  const d = ap?.data?._single;
+  if (!d) return null;
+
+  return {
+    labels: ['Current', '1–30 Days', '31–60 Days', '61–90 Days', '90+ Days'],
+    values: [d.current || 0, d.days30 || 0, d.days60 || 0, d.days90 || 0, d.days90Plus || 0],
+  };
+}
+
+function buildDebtProfile(byType) {
+  const ds = byType[DOC_TYPES.DEBT_SCHEDULE];
+  const instruments = ds?.data?._single?.instruments;
+  if (!instruments || instruments.length === 0) return null;
+
+  return {
+    instruments: instruments.map(i => ({
+      name: i.name,
+      principal: toMillions(i.principal),
+      rate: i.rate,
+      maturity: i.maturityDate || '—',
+    })),
+  };
+}
+
+function buildForecastComparison(byType, revenueData) {
+  const proj = byType[DOC_TYPES.PROJECTIONS];
+  if (!proj) return null;
+
+  const histLabels = revenueData.labels || [];
+  const histRevenue = revenueData.revenue || [];
+  const histEbitda = revenueData.ebitda || [];
+
+  const projPeriods = proj.periods.filter(p => p !== '_single');
+  const projRevenue = projPeriods.map(yr => toMillions(proj.data[yr]?.projectedRevenue));
+  const projEbitda = projPeriods.map(yr => toMillions(proj.data[yr]?.projectedEbitda));
+
+  const labels = [...histLabels, ...projPeriods];
+  const dividerIndex = histLabels.length;
+
+  // Pad arrays so historical and projected don't overlap
+  const hRev = [...histRevenue, ...projPeriods.map(() => null)];
+  const pRev = [...histLabels.map(() => null), ...projRevenue];
+  const ebitdaLine = [...histEbitda, ...projEbitda];
+
+  return {
+    labels,
+    historicalRevenue: hRev,
+    projectedRevenue: pRev,
+    historicalEbitda: ebitdaLine.slice(0, dividerIndex),
+    projectedEbitda: ebitdaLine.slice(dividerIndex),
+    dividerIndex,
+  };
+}
+
+function buildWorkingCapital(byType, periods) {
+  const bs = byType[DOC_TYPES.BALANCE_SHEET];
+  if (!bs) return null;
+
+  const labels = periods.filter(p => p !== '_single' && bs.data[p]);
+  if (labels.length === 0) return null;
+
+  const currentAssets = labels.map(yr => toMillions(bs.data[yr]?.totalCurrentAssets));
+  const currentLiabilities = labels.map(yr => toMillions(bs.data[yr]?.totalCurrentLiabilities));
+  const netWorkingCapital = labels.map((_, i) =>
+    currentAssets[i] != null && currentLiabilities[i] != null
+      ? round(currentAssets[i] - currentLiabilities[i], 1) : null
+  );
+
+  return { labels, currentAssets, currentLiabilities, netWorkingCapital };
+}
+
+// ============================================================
+// Narrative generators
+// ============================================================
+
+function generateInvestmentSummary(ctx) {
+  const { companyName, revenueData, marginsData, cashflowData, leverageData, concentration, overallScore } = ctx;
+  const latestRev    = lastNonNull(revenueData.revenue);
+  const latestEbitda = lastNonNull(revenueData.ebitda);
+  const latestMargin = lastNonNull(marginsData.ebitda);
+  const latestLev    = lastNonNull(leverageData.debtToEbitda);
+  const ocf          = cashflowData.values?.[0];
+
+  const revStr    = latestRev != null ? `$${latestRev.toFixed(1)}M` : 'N/A';
+  const ebitdaStr = latestEbitda != null ? `$${latestEbitda.toFixed(2)}M` : 'N/A';
+  const marginStr = latestMargin != null ? `${latestMargin.toFixed(1)}%` : 'N/A';
+
+  let s = `<strong>${companyName}</strong> is a mid-market business generating ${revStr} in trailing revenue with ${ebitdaStr} adjusted EBITDA (${marginStr} margin). `;
+
+  const revs = revenueData.revenue.filter(r => r != null && r > 0);
+  if (revs.length >= 2) {
+    const cagr = ((Math.pow(revs[revs.length - 1] / revs[0], 1 / (revs.length - 1)) - 1) * 100).toFixed(1);
+    s += `The company has demonstrated top-line growth of ~${cagr}% CAGR with `;
+    s += latestMargin != null && latestMargin > 15
+      ? 'healthy margins, indicating pricing power and operational efficiency gains.'
+      : 'stable margins across the review period.';
+  }
+
+  s += '<br><br>';
+
+  if (ocf != null && latestEbitda != null && latestEbitda > 0) {
+    const conv = Math.round((ocf / latestEbitda) * 100);
+    s += `Key strengths include ${conv >= 80 ? 'strong' : 'adequate'} cash flow conversion (${conv}% OCF/EBITDA)`;
+  } else {
+    s += 'Key strengths include the company\'s established market position';
+  }
+
+  if (concentration.topCustomerPct != null && concentration.topCustomerPct > 20) {
+    s += `. However, meaningful customer concentration (top customer = ${concentration.topCustomerPct}% of revenue)`;
+    s += latestLev != null && latestLev > 3
+      ? ` and above-target leverage (${latestLev.toFixed(1)}x) present integration and financing risks.`
+      : ' presents a key integration risk that should be addressed through deal structuring.';
+  } else {
+    s += ' and a well-diversified customer base.';
+  }
+
+  s += '<br><br>';
+
+  if (latestEbitda != null) {
+    const lo = overallScore >= 72 ? 5.0 : 4.0;
+    const hi = overallScore >= 72 ? 7.0 : 5.5;
+    s += `At a preliminary valuation range of ${lo.toFixed(1)}–${hi.toFixed(1)}x EBITDA ($${(latestEbitda * lo).toFixed(1)}M–$${(latestEbitda * hi).toFixed(1)}M enterprise value), the deal is actionable contingent on satisfactory Quality of Earnings findings and negotiation of appropriate risk mitigants.`;
+  }
+
+  return s;
+}
+
+function generateAcquisitionAdvice(ctx) {
+  const {
+    companyName,
+    overall,
+    dimensions,
+    risks,
+    missingItems,
+    leverageData,
+    concentration,
+    earningsQuality,
+    forecastData,
+    balanceSheetData,
+  } = ctx;
+
+  const priorities = [];
+  const add = (stage, priority, title, category, confidence, body, support = {}) => {
+    priorities.push({
+      stage,
+      priority,
+      title,
+      category,
+      confidence,
+      body,
+      support,
+    });
+  };
+
+  const dim = (key) => dimensions.find((entry) => entry.key === key);
+  const profitability = dim('profitability');
+  const revenueStability = dim('revenueStability');
+  const liquidity = dim('liquidity');
+  const leverage = dim('leverage');
+  const cashConversion = dim('cashConversion');
+  const concentrationDim = dim('concentration');
+  const earningsQualityDim = dim('earningsQuality');
+  const forecastCredibility = dim('forecastCredibility');
+
+  const hasMissing = (pattern) => missingItems.some((item) => item.text.toLowerCase().includes(pattern.toLowerCase()));
+  const highOrCriticalMissing = missingItems.filter((item) => item.impact === 'critical' || item.impact === 'high');
+  const highRisks = risks.filter((risk) => risk.severity === 'high');
+
+  if (highOrCriticalMissing.length > 0) {
+    add(
+      'critical',
+      1,
+      'Close core financial verification gaps before price discovery',
+      'financial verification',
+      overall.confidence === 'high' ? 'medium' : 'high',
+      `Do not anchor valuation too tightly until the seller provides the missing core support, including ${highOrCriticalMissing.slice(0, 3).map((item) => item.text.replace(' not provided', '')).join(', ')}. The current view is directionally useful, but incomplete document coverage materially limits confidence in EBITDA, leverage, and working-capital conclusions.`,
+      {
+        requests: highOrCriticalMissing.map((item) => item.text),
+        valuationImpact: 'Incomplete support should justify a narrower LOI range, heavier diligence conditions, or a delayed indication of value.',
+      }
+    );
+  }
+
+  if ((concentration?.topCustomerPct ?? 0) >= 15 || (concentrationDim?.score ?? 100) < 65) {
+    add(
+      'critical',
+      2,
+      'Underwrite customer concentration before committing to a clean LOI',
+      'customer diligence',
+      concentrationDim?.confidence || 'medium',
+      `Customer concentration appears meaningful${concentration?.topCustomerPct != null ? `, with the top customer at ${concentration.topCustomerPct}% of revenue` : ''}. A buyer should request top-customer contracts, renewal history, churn data, and gross-margin by account to determine whether revenue is transferable and whether concentration should drive an earnout, customer-retention holdback, or lower upfront multiple.`,
+      {
+        managementQuestions: [
+          'Which customer relationships are personally owned by the seller?',
+          'What has renewal and pricing behavior looked like for the top 10 accounts?',
+          'Are there any contracts up for renewal, rebid, or repricing in the next 12 months?',
+        ],
+        structure: 'Consider retention-based holdback or earnout if a small number of accounts drive a disproportionate share of EBITDA.',
+      }
+    );
+  }
+
+  if ((leverage?.score ?? 100) < 65 || (lastNonNull(leverageData.debtToEbitda) ?? 0) > 3.5) {
+    const latestLev = lastNonNull(leverageData.debtToEbitda);
+    add(
+      'critical',
+      3,
+      'Pressure-test debt capacity and existing lender constraints',
+      'debt and covenant review',
+      leverage?.confidence || 'medium',
+      `Leverage looks elevated${latestLev != null ? ` at ${latestLev.toFixed(1)}x Debt/EBITDA` : ''}. Before an LOI hardens, request the full debt schedule, note agreements, covenant package, and any lender consent requirements. This is a likely area for price tension if refinancing costs, prepayment penalties, or covenant tightness reduce post-close cash flow.`,
+      {
+        requests: [
+          'Full debt schedule by instrument',
+          'Current covenant compliance certificates',
+          'Payoff letters and prepayment penalty detail',
+        ],
+        structure: 'May require price adjustment for debt-like items or a lower leverage assumption in the capital structure.',
+      }
+    );
+  }
+
+  if ((earningsQualityDim?.score ?? 100) < 70 || earningsQuality.addBackPct != null || earningsQuality.ownerCompAboveMarket != null) {
+    const normalizationNotes = [];
+    if (earningsQuality.addBackPct != null) normalizationNotes.push(`add-backs equal ${earningsQuality.addBackPct.toFixed(1)}% of adjusted EBITDA`);
+    if (earningsQuality.ownerCompAboveMarket != null) normalizationNotes.push(`owner compensation appears above market by about $${Math.round(earningsQuality.ownerCompAboveMarket / 1000)}K`);
+
+    add(
+      'critical',
+      4,
+      'Validate earnings normalization and QoE adjustments',
+      'earnings normalization review',
+      earningsQualityDim?.confidence || 'medium',
+      `Normalized earnings need direct verification${normalizationNotes.length > 0 ? ` because ${normalizationNotes.join(' and ')}` : ''}. The buyer should commission QoE work that ties reported EBITDA to tax returns, general ledger support, and bank statements before relying on headline multiple math.`,
+      {
+        requests: [
+          'Monthly P&L detail and general ledger export',
+          'Owner compensation detail and related-party expenses',
+          'Bank statements and tax returns for tie-out testing',
+        ],
+        structure: 'Potential purchase price adjustment if EBITDA normalization proves aggressive.',
+      }
+    );
+  }
+
+  if ((profitability?.score ?? 100) < 70) {
+    add(
+      'important',
+      5,
+      'Test whether current margins are sustainable under new ownership',
+      'margin sustainability',
+      profitability?.confidence || 'medium',
+      'Margin quality should be validated by reviewing product or service mix, supplier concentration, pricing power, and any deferred maintenance in SG&A. A search-fund buyer should be cautious about paying for margins that depend on founder relationships, underinvestment, or temporary cost deferrals.',
+      {
+        managementQuestions: [
+          'Which gross-margin gains were structural versus one-time?',
+          'What expenses have been intentionally delayed or minimized by the current owner?',
+          'How should compensation, rent, or shared services be normalized post-close?',
+        ],
+      }
+    );
+  }
+
+  if ((cashConversion?.score ?? 100) < 72 || (liquidity?.score ?? 100) < 70 || hasMissing('AR Aging Schedule') || hasMissing('AP Aging Schedule')) {
+    add(
+      'important',
+      6,
+      'Run a focused working-capital diligence workstream',
+      'working capital diligence',
+      cashConversion?.confidence || liquidity?.confidence || 'medium',
+      'Working capital should be diligenced separately from EBITDA. Request month-end AR/AP agings, inventory detail where relevant, and a trailing monthly net working capital rollforward to determine the normalized peg and identify any seasonality, slow collections, or stretched payables.',
+      {
+        requests: [
+          'Trailing 12-month monthly working-capital rollforward',
+          'AR aging and bad-debt history',
+          'AP aging and key vendor terms',
+        ],
+        structure: 'A weak peg can be handled through a post-close true-up rather than headline price, but it still affects buyer returns.',
+      }
+    );
+  }
+
+  if ((forecastCredibility?.score ?? 100) < 68 || forecastData.gap != null) {
+    add(
+      'important',
+      7,
+      'Challenge the management case and downside scenario',
+      'financial verification',
+      forecastCredibility?.confidence || 'medium',
+      `Management projections need a bottoms-up review${forecastData.gap != null ? ` because projected growth appears to exceed historical growth by about ${forecastData.gap.toFixed(1)} percentage points` : ''}. Ask management to reconcile the forecast to bookings, pipeline, customer retention assumptions, and hiring plans before underwriting any upside in valuation.`,
+      {
+        managementQuestions: [
+          'What specific commercial initiatives drive the forecast above historical trend?',
+          'How much of next year revenue is already contracted or highly visible?',
+          'What downside case does management use internally?',
+        ],
+      }
+    );
+  }
+
+  add(
+    'important',
+    8,
+    'Assess owner dependence and management transition risk',
+    'management reliance / owner dependence',
+    overall.confidence === 'low' ? 'medium' : 'high',
+    `${companyName} should be diligenced for key-person dependence even if the financial profile is workable. A search-fund buyer should map who owns customer relationships, operational decision-making, lender relationships, and vendor negotiations to determine whether a transition services agreement, seller rollover, or retention package is required.`,
+    {
+      managementQuestions: [
+        'Which decisions still require direct owner approval today?',
+        'Who are the top second-layer managers and what are their retention expectations?',
+        'Which customer or vendor relationships would be most disrupted by a transition?',
+      ],
+      structure: 'May support a seller rollover, consulting agreement, or earnout tied to transition success.',
+    }
+  );
+
+  priorities.sort((a, b) => a.priority - b.priority);
+
+  return {
+    attractiveness: getAttractiveness(overall.score, overall.confidence, highRisks.length, highOrCriticalMissing.length),
+    confidence: overall.confidence,
+    summary: buildAdviceSummary(overall.score, overall.confidence, highRisks.length, highOrCriticalMissing.length),
+    keyRisks: risks.slice(0, 5),
+    criticalBeforeLoi: priorities.filter((item) => item.stage === 'critical'),
+    importantDuringDiligence: priorities.filter((item) => item.stage === 'important'),
+  };
+}
+
+function generateGrowthOpportunities(ctx) {
+  const {
+    companyName,
+    overall,
+    dimensions,
+    revenueData,
+    marginsData,
+    leverageData,
+    cashflowData,
+    concentration,
+    earningsQuality,
+    forecastData,
+    customerBreakdown,
+    expenseComposition,
+    arAging,
+    workingCapital,
+    missingItems,
+    availableDocTypes,
+  } = ctx;
+
+  const latestRevenue = lastNonNull(revenueData.revenue);
+  const latestEbitda = lastNonNull(revenueData.ebitda);
+  const latestGrossMargin = lastNonNull(marginsData.gross);
+  const firstGrossMargin = firstNonNull(marginsData.gross);
+  const latestEbitdaMargin = lastNonNull(marginsData.ebitda);
+  const revs = revenueData.revenue.filter(v => v != null && v > 0);
+  const historicalGrowth = revs.length >= 2
+    ? ((Math.pow(revs[revs.length - 1] / revs[0], 1 / (revs.length - 1)) - 1) * 100)
+    : null;
+  const operatingExpense = expenseComposition?.labels?.includes('Operating Expenses')
+    ? expenseComposition.values[expenseComposition.labels.indexOf('Operating Expenses')]
+    : null;
+  const cogs = expenseComposition?.labels?.includes('COGS')
+    ? expenseComposition.values[expenseComposition.labels.indexOf('COGS')]
+    : null;
+  const over30Ar = arAging?.values ? arAging.values.slice(2).reduce((sum, val) => sum + val, 0) : null;
+  const totalAr = arAging?.values ? arAging.values.reduce((sum, val) => sum + val, 0) : null;
+  const arDragPct = totalAr ? (over30Ar / totalAr) * 100 : null;
+
+  const opportunities = [];
+  const push = ({
+    category,
+    title,
+    why,
+    signals,
+    impactLow,
+    impactHigh,
+    confidence,
+    priority,
+    assumptions,
+    evidenceDocTypes = [],
+    executionWindow = 'post-close initiative',
+  }) => {
+    opportunities.push({
+      category,
+      title,
+      whyItExists: why,
+      supportingMetrics: signals.filter(Boolean),
+      estimatedImpact: formatImpactRange(impactLow, impactHigh),
+      confidence,
+      priority,
+      underwritingAssumptions: normalizeAssumptions(assumptions),
+      evidenceDocuments: mapEvidenceDocs(evidenceDocTypes, availableDocTypes),
+      executionWindow,
+      midpointImpact: ((impactLow || 0) + (impactHigh || 0)) / 2,
+    });
+  };
+
+  if (latestRevenue != null && latestGrossMargin != null && latestEbitdaMargin != null && concentration.top3Pct != null && concentration.top3Pct >= 35) {
+    const top3Revenue = latestRevenue * (concentration.top3Pct / 100);
+    const low = top3Revenue * 0.01 * (latestGrossMargin / 100) * 0.75;
+    const high = top3Revenue * 0.02 * (latestGrossMargin / 100) * 0.8;
+    push({
+      category: 'Revenue Growth Opportunities',
+      title: 'Targeted price-and-mix expansion within the largest accounts',
+      why: `The company already supports meaningful wallet share with its top accounts, and gross margin has improved from ${firstGrossMargin?.toFixed(1) || 'N/A'}% to ${latestGrossMargin.toFixed(1)}% without interrupting growth. That pattern usually indicates room for selective repricing, premium mix migration, or higher-value service bundling rather than broad-based volume chasing.`,
+      signals: [
+        `Top 3 customers represent ${concentration.top3Pct}% of revenue`,
+        `Gross margin improved to ${latestGrossMargin.toFixed(1)}%`,
+        historicalGrowth != null ? `Historical revenue CAGR: ${historicalGrowth.toFixed(1)}%` : null,
+      ],
+      impactLow: low,
+      impactHigh: high,
+      confidence: 'medium',
+      priority: 1,
+      assumptions: [
+        'Assumes 1% to 2% net price-and-mix improvement inside the top 3 customer base.',
+        `Assumes ${Math.round((latestGrossMargin / 100) * 100)}% gross-margin conversion and 75% to 80% drop-through to EBITDA.`,
+      ],
+      evidenceDocTypes: [DOC_TYPES.INCOME_STATEMENT, DOC_TYPES.REVENUE_BREAKDOWN],
+      executionWindow: 'quick win',
+    });
+  }
+
+  if (operatingExpense != null && latestRevenue != null && operatingExpense / latestRevenue >= 0.2) {
+    const opexRatio = (operatingExpense / latestRevenue) * 100;
+    const low = operatingExpense * 0.05;
+    const high = operatingExpense * 0.1;
+    push({
+      category: 'Margin Expansion Opportunities',
+      title: 'SG&A rationalization against the current revenue base',
+      why: `Operating expense appears elevated relative to the current scale of the business. With EBITDA margin already at ${latestEbitdaMargin?.toFixed(1) || 'N/A'}%, the next leg of value creation is likely to come from tightening overhead, eliminating owner-era spend, and imposing a cleaner budgeting cadence rather than relying solely on incremental revenue.`,
+      signals: [
+        `Operating expenses are ${opexRatio.toFixed(1)}% of revenue`,
+        latestEbitdaMargin != null ? `EBITDA margin: ${latestEbitdaMargin.toFixed(1)}%` : null,
+        latestRevenue != null ? `Trailing revenue: $${latestRevenue.toFixed(1)}M` : null,
+      ],
+      impactLow: low,
+      impactHigh: high,
+      confidence: missingItems.some(item => item.text.includes('Income Statement')) ? 'low' : 'medium',
+      priority: 2,
+      assumptions: [
+        'Assumes 5% to 10% of operating expense can be removed without impairing growth.',
+        'Assumes identified savings are overhead or owner-era costs rather than frontline selling capacity.',
+      ],
+      evidenceDocTypes: [DOC_TYPES.INCOME_STATEMENT, DOC_TYPES.QOE_REPORT],
+      executionWindow: 'quick win',
+    });
+  }
+
+  if (latestRevenue != null && latestGrossMargin != null && firstGrossMargin != null && latestGrossMargin > firstGrossMargin) {
+    const low = latestRevenue * 0.005;
+    const high = latestRevenue * 0.01;
+    push({
+      category: 'Operational Improvements',
+      title: 'Systematize procurement and gross-margin discipline',
+      why: `Gross margin has been moving in the right direction, which suggests management has already demonstrated some pricing or procurement control. A buyer can formalize that playbook post-close through vendor consolidation, tighter quoting discipline, and product/customer profitability reporting.`,
+      signals: [
+        `Gross margin expanded from ${firstGrossMargin.toFixed(1)}% to ${latestGrossMargin.toFixed(1)}%`,
+        cogs != null ? `Current COGS base: $${cogs.toFixed(1)}M` : null,
+      ],
+      impactLow: low,
+      impactHigh: high,
+      confidence: 'medium',
+      priority: 3,
+      assumptions: [
+        'Impact assumes another 50 to 100 bps of gross-margin improvement on the current revenue base.',
+        'Assumes gains come from procurement, quoting discipline, and customer/product mix management rather than one-off supplier concessions.',
+      ],
+      evidenceDocTypes: [DOC_TYPES.INCOME_STATEMENT],
+      executionWindow: 'post-close initiative',
+    });
+  }
+
+  if (earningsQuality.ownerCompAboveMarket != null && latestEbitda != null) {
+    const uplift = earningsQuality.ownerCompAboveMarket / 1000000;
+    push({
+      category: 'Strategic / Acquisition Levers',
+      title: 'Capture immediate EBITDA lift through owner-cost normalization',
+      why: `Reported profitability appears to include seller-specific compensation structure. For a buy-side process, this is one of the clearest and most underwritable sources of EBITDA uplift because it does not depend on commercial outperformance.`,
+      signals: [
+        `Owner compensation above market: ~$${Math.round(earningsQuality.ownerCompAboveMarket / 1000)}K`,
+        `Current EBITDA: $${latestEbitda.toFixed(2)}M`,
+      ],
+      impactLow: uplift * 0.9,
+      impactHigh: uplift,
+      confidence: 'high',
+      priority: 4,
+      assumptions: [
+        'Assumes the identified owner compensation is genuinely non-recurring and can be normalized post-close.',
+        'Assumes no like-for-like replacement hire is needed beyond the market-rate replacement cost already embedded in the QoE adjustment.',
+      ],
+      evidenceDocTypes: [DOC_TYPES.QOE_REPORT, DOC_TYPES.TAX_RETURN],
+      executionWindow: 'quick win',
+    });
+  }
+
+  if (arDragPct != null && arDragPct >= 10 && latestRevenue != null) {
+    const low = latestRevenue * 0.002;
+    const high = latestRevenue * 0.006;
+    push({
+      category: 'Operational Improvements',
+      title: 'Tighten collections and order-to-cash execution',
+      why: `Receivables aging suggests a meaningful portion of the book is drifting past 30 days. The direct EBITDA impact is smaller than the cash impact, but better collections discipline usually reduces bad-debt leakage, billing rework, and commercial discounting.`,
+      signals: [
+        `${arDragPct.toFixed(1)}% of AR is older than 30 days`,
+        totalAr != null ? `Total AR balance: $${(totalAr / 1000000).toFixed(2)}M` : null,
+        workingCapital?.netWorkingCapital ? `Latest net working capital: $${lastNonNull(workingCapital.netWorkingCapital)?.toFixed(1)}M` : null,
+      ],
+      impactLow: low,
+      impactHigh: high,
+      confidence: 'medium',
+      priority: 5,
+      assumptions: [
+        'Impact assumes lower bad debt and reduced revenue leakage rather than a pure cash-only benefit.',
+        'Assumes order-to-cash cleanup modestly reduces write-offs, credits, and billing friction.',
+      ],
+      evidenceDocTypes: [DOC_TYPES.AR_AGING, DOC_TYPES.BALANCE_SHEET],
+      executionWindow: 'quick win',
+    });
+  }
+
+  if (forecastData.gap != null && forecastData.gap > 2 && latestRevenue != null) {
+    const underwritableGrowth = Math.min(forecastData.gap, 3);
+    const low = latestRevenue * 0.01 * (latestEbitdaMargin || 15) / 100;
+    const high = latestRevenue * (underwritableGrowth / 100) * (latestEbitdaMargin || 15) / 100;
+    push({
+      category: 'Strategic / Acquisition Levers',
+      title: 'Underwrite only the portion of management growth that is supportable',
+      why: `Management is projecting growth ahead of historical performance. That gap can be reframed as a value-creation opportunity for a disciplined buyer: underwrite only the portion backed by historical execution, then treat the excess as upside rather than base-case value.`,
+      signals: [
+        `Projected growth exceeds historical CAGR by ${forecastData.gap.toFixed(1)}pp`,
+        historicalGrowth != null ? `Historical CAGR: ${historicalGrowth.toFixed(1)}%` : null,
+        forecastData.projectedGrowth != null ? `Projected growth: ${forecastData.projectedGrowth.toFixed(1)}%` : null,
+      ],
+      impactLow: low,
+      impactHigh: high,
+      confidence: 'low',
+      priority: 6,
+      assumptions: [
+        'This is an underwriting lever more than an operating certainty; confidence depends on pipeline support not currently in the file.',
+        'Impact assumes only 1% to 3% of forecasted revenue growth is ultimately underwritten into the base plan.',
+      ],
+      evidenceDocTypes: [DOC_TYPES.PROJECTIONS, DOC_TYPES.INCOME_STATEMENT],
+      executionWindow: 'post-close initiative',
+    });
+  }
+
+  const ranked = opportunities
+    .sort((a, b) => (a.priority - b.priority) || (b.midpointImpact - a.midpointImpact))
+    .slice(0, 6);
+
+  const categories = [
+    'Revenue Growth Opportunities',
+    'Margin Expansion Opportunities',
+    'Operational Improvements',
+    'Strategic / Acquisition Levers',
+  ].map((category) => ({
+    name: category,
+    items: ranked.filter((item) => item.category === category),
+  }));
+
+  return {
+    summary: buildGrowthSummary(companyName, overall, ranked),
+    topOpportunities: ranked.slice(0, 6),
+    categories,
+    quickWins: ranked.filter((item) => item.executionWindow === 'quick win'),
+    postCloseInitiatives: ranked.filter((item) => item.executionWindow === 'post-close initiative'),
+  };
+}
+
+function buildGrowthSummary(companyName, overall, opportunities) {
+  if (opportunities.length === 0) {
+    return `${companyName} does not yet have enough structured data to support a credible value-creation plan. Additional operating detail is required before underwriting growth or margin expansion.`;
+  }
+
+  return `${companyName} shows ${opportunities.length} data-backed value-creation levers worth underwriting. The most credible path appears to be a mix of selective commercial expansion, overhead discipline, and acquisition-specific EBITDA normalization rather than a heroic revenue acceleration case. Overall underwriting confidence is ${overall.confidence}.`;
+}
+
+function formatImpactRange(low, high) {
+  if (low == null && high == null) return 'Impact not estimable with current data';
+  if (high == null || Math.abs(high - low) < 0.02) return `~$${(low || high).toFixed(2)}M EBITDA`;
+  return `$${low.toFixed(2)}M-$${high.toFixed(2)}M EBITDA`;
+}
+
+function normalizeAssumptions(assumptions) {
+  if (!assumptions) return [];
+  return Array.isArray(assumptions) ? assumptions : [assumptions];
+}
+
+function mapEvidenceDocs(docTypes, availableDocTypes = []) {
+  const available = new Set(availableDocTypes || []);
+  return (docTypes || []).map((docType) => ({
+    type: docType,
+    label: DOC_TYPE_LABELS[docType] || docType,
+    provided: available.has(docType),
+  }));
+}
+
+function getAttractiveness(score, confidence, highRiskCount, missingCount) {
+  if (score >= 72 && highRiskCount <= 1 && missingCount === 0 && confidence === 'high') {
+    return 'Attractive for deeper diligence';
+  }
+  if (score >= 58) {
+    return 'Potentially attractive, but only with targeted diligence';
+  }
+  return 'Not yet attractive for a clean pursuit';
+}
+
+function buildAdviceSummary(score, confidence, highRiskCount, missingCount) {
+  if (score >= 72 && highRiskCount <= 1 && missingCount === 0) {
+    return `The target appears financeable enough to justify deeper diligence, but the recommendation assumes current findings hold up under third-party verification. Confidence is ${confidence}.`;
+  }
+  if (score >= 58) {
+    return `The opportunity is actionable for a search-fund buyer, but valuation and structure should remain conditional until the main risk items and document gaps are closed. Confidence is ${confidence}.`;
+  }
+  return `The current file supports caution rather than speed. A buyer should avoid a clean LOI until the major financial and diligence gaps are resolved. Confidence is ${confidence}.`;
+}
+
+const STEP_LIBRARY = [
+  { trigger: () => true,
+    title: 'Commission Quality of Earnings (QoE)',
+    desc: 'Engage a third-party accounting firm to validate adjusted EBITDA, normalize owner comp, and stress-test working capital assumptions.' },
+  { trigger: (_, dims) => (dims.find(d => d.key === 'concentration')?.score ?? 65) < 70,
+    title: 'Customer Concentration Due Diligence',
+    desc: 'Request detailed contract terms for top customers. Assess renewal risk, switching costs, and historical churn. Consider holdback or earnout tied to key account retention.' },
+  { trigger: (_, dims) => (dims.find(d => d.key === 'leverage')?.score ?? 65) < 70,
+    title: 'Debt Capacity & Financing Structure',
+    desc: 'Model acquisition financing at target leverage. Explore SBA 7(a) or mezzanine tranches. Sensitivity-test debt service coverage under downside scenarios.' },
+  { trigger: () => true,
+    title: 'Management Transition Assessment',
+    desc: 'Evaluate owner dependency. If owner is critical to key relationships, negotiate a 12–24 month transition period with incentive alignment.' },
+  { trigger: () => true,
+    title: 'Preliminary LOI & Deal Structuring',
+    desc: 'Draft LOI with seller note and earnout tied to revenue retention and EBITDA targets over 24 months post-close.' },
+  { trigger: (_, dims) => (dims.find(d => d.key === 'forecastCredibility')?.score ?? 65) < 65,
+    title: 'Validate Management Projections',
+    desc: 'Scrutinize forward assumptions against historical performance. Request bottom-up revenue build and customer pipeline data to substantiate growth claims.' },
+  { trigger: (_, dims) => (dims.find(d => d.key === 'cashConversion')?.score ?? 65) < 70,
+    title: 'Cash Flow Deep Dive',
+    desc: 'Analyze working capital cycle, capex requirements, and one-time items affecting cash flow. Determine sustainable free cash flow for debt service.' },
+  { trigger: (_, dims) => (dims.find(d => d.key === 'profitability')?.score ?? 65) < 65,
+    title: 'Operational Improvement Assessment',
+    desc: 'Identify margin expansion opportunities through cost rationalization, procurement optimization, or pricing strategy adjustments post-acquisition.' },
+];
+
+function generateNextSteps(risks, dimensions) {
+  return STEP_LIBRARY
+    .filter(s => s.trigger(risks, dimensions))
+    .slice(0, 6)
+    .map(s => ({ title: s.title, desc: s.desc }));
+}
+
+function buildDataQualitySummary(results, validation) {
+  const usableResults = results.filter((result) => result.usable);
+  const avgConfidence = usableResults.length > 0
+    ? usableResults.reduce((sum, result) => sum + (result.confidence || 0), 0) / usableResults.length
+    : 0;
+
+  const extractionDocuments = usableResults
+    .slice()
+    .sort((left, right) => (right.confidence || 0) - (left.confidence || 0))
+    .map((result) => ({
+      docType: result.docType,
+      label: DOC_TYPE_LABELS[result.docType] || result.docType,
+      confidencePct: Math.round((result.confidence || 0) * 100),
+      confidenceLabel: toConfidenceLabel(result.confidence || 0),
+      source: result.synthetic ? 'modeled fallback' : 'normalized upload',
+      missingFields: Array.isArray(result.coverage?.missing) ? result.coverage.missing.slice(0, 4) : [],
+      warningCount: Array.isArray(result.warnings) ? result.warnings.length : 0,
+    }));
+
+  const extractionMissing = extractionDocuments
+    .filter((document) => document.missingFields.length > 0)
+    .map((document) => ({
+      message: `${document.label} is missing mapped fields: ${document.missingFields.join(', ')}.`,
+      impact: document.missingFields.length >= 3 ? 'medium' : 'low',
+      docType: document.docType,
+    }));
+
+  return {
+    extractionConfidence: {
+      averagePct: Math.round(avgConfidence * 100),
+      averageLabel: toConfidenceLabel(avgConfidence),
+      documentCount: extractionDocuments.length,
+      modeledFallbacks: extractionDocuments.filter((document) => document.source === 'modeled fallback').length,
+    },
+    documents: extractionDocuments,
+    validationStatus: validation.status,
+    validationWarnings: validation.warnings || [],
+    hardErrors: validation.hardErrors || [],
+    missingDataNotes: [...(validation.missingDataNotes || []), ...extractionMissing].slice(0, 10),
+    confidenceAdjustment: validation.confidenceAdjustment,
+    summary: validation.summary,
+  };
+}
+
+// ============================================================
+// Utilities
+// ============================================================
+
+function toMillions(val) {
+  if (val == null) return null;
+  return Math.round(val / 100000) / 10;
+}
+
+function lastNonNull(arr) {
+  if (!arr) return null;
+  for (let i = arr.length - 1; i >= 0; i--) if (arr[i] != null) return arr[i];
+  return null;
+}
+
+function firstNonNull(arr) {
+  if (!arr) return null;
+  for (let i = 0; i < arr.length; i++) if (arr[i] != null) return arr[i];
+  return null;
+}
+
+function round(n, decimals = 2) {
+  const f = Math.pow(10, decimals);
+  return Math.round(n * f) / f;
+}
+
+function toConfidenceLabel(value) {
+  if (value >= 0.8) return 'high';
+  if (value >= 0.55) return 'medium';
+  if (value > 0) return 'low';
+  return 'none';
+}

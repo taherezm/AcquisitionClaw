@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AcquisitionClaw — Private Company Analysis</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top-bar">
+    <div class="logo">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      <span>AcquisitionClaw</span>
+    </div>
+    <nav class="top-nav">
+      <button class="nav-btn active" data-view="upload">New Analysis</button>
+      <button class="nav-btn" data-view="dashboard" id="nav-dashboard" disabled>Dashboard</button>
+    </nav>
+  </header>
+
+  <main id="app">
+    <!-- UPLOAD VIEW -->
+    <section id="view-upload" class="view active">
+      <div class="upload-container">
+        <div class="upload-header">
+          <h1>Begin Acquisition Analysis</h1>
+          <p class="subtitle">Upload financial documents to generate a comprehensive health assessment and acquisition recommendations.</p>
+        </div>
+
+        <div class="company-fields">
+          <div class="field">
+            <label for="company-name">Company Name</label>
+            <input type="text" id="company-name" placeholder="e.g. Acme Manufacturing Co.">
+          </div>
+          <div class="field">
+            <label for="industry">Industry</label>
+            <select id="industry">
+              <option value="">Select industry...</option>
+              <option value="manufacturing">Manufacturing</option>
+              <option value="saas">SaaS / Software</option>
+              <option value="healthcare">Healthcare Services</option>
+              <option value="professional-services">Professional Services</option>
+              <option value="distribution">Distribution / Logistics</option>
+              <option value="construction">Construction</option>
+              <option value="retail">Retail / E-Commerce</option>
+              <option value="food-beverage">Food & Beverage</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ebitda-range">EBITDA Range <span class="optional">(optional)</span></label>
+            <select id="ebitda-range">
+              <option value="">Select range...</option>
+              <option value="sub-1m">&lt; $1M</option>
+              <option value="1m-3m">$1M – $3M</option>
+              <option value="3m-5m">$3M – $5M</option>
+              <option value="5m-10m">$5M – $10M</option>
+              <option value="10m-25m">$10M – $25M</option>
+              <option value="25m-plus">$25M+</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="drop-zone" id="drop-zone">
+          <div class="drop-zone-content">
+            <svg class="drop-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p class="drop-text">Drag & drop financial documents here</p>
+            <p class="drop-hint">CSV and XLSX are supported in v1. PDF parsing is queued for a later backend parser.</p>
+            <button class="btn-secondary" id="browse-btn">Browse Files</button>
+            <input type="file" id="file-input" multiple accept=".csv,.xlsx,.pdf" hidden>
+          </div>
+        </div>
+
+        <div class="file-list" id="file-list"></div>
+        <div class="upload-message" id="upload-message" hidden></div>
+
+        <button class="btn-primary" id="analyze-btn" disabled>
+          Run Analysis
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+          </svg>
+        </button>
+      </div>
+    </section>
+
+    <!-- PROCESSING VIEW -->
+    <section id="view-processing" class="view">
+      <div class="processing-container">
+        <h2>Analyzing Financial Documents</h2>
+        <p class="subtitle" id="processing-company"></p>
+        <div class="steps" id="processing-steps">
+          <div class="step" data-step="classify">
+            <div class="step-indicator"><div class="spinner"></div><svg class="check-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div class="step-label">Classifying documents</div>
+          </div>
+          <div class="step" data-step="extract">
+            <div class="step-indicator"><div class="spinner"></div><svg class="check-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div class="step-label">Extracting financial data</div>
+          </div>
+          <div class="step" data-step="reconcile">
+            <div class="step-indicator"><div class="spinner"></div><svg class="check-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div class="step-label">Reconciling metrics</div>
+          </div>
+          <div class="step" data-step="score">
+            <div class="step-indicator"><div class="spinner"></div><svg class="check-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div class="step-label">Generating health score</div>
+          </div>
+          <div class="step" data-step="charts">
+            <div class="step-indicator"><div class="spinner"></div><svg class="check-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>
+            <div class="step-label">Preparing charts & recommendations</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- DASHBOARD VIEW -->
+    <section id="view-dashboard" class="view">
+      <div class="dashboard">
+        <!-- Header -->
+        <div class="dash-header">
+          <div>
+            <h1 id="dash-company-name">Company Name</h1>
+            <p class="dash-meta"><span id="dash-industry"></span><span id="dash-ebitda" class="dash-tag"></span><span class="dash-tag" id="dash-date"></span></p>
+          </div>
+          <button class="btn-secondary" id="new-analysis-btn">New Analysis</button>
+        </div>
+
+        <!-- Overall Score -->
+        <div class="overall-score-card">
+          <div class="score-ring-container">
+            <svg class="score-ring" viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="52" fill="none" stroke="var(--border)" stroke-width="8"/>
+              <circle class="score-ring-fill" cx="60" cy="60" r="52" fill="none" stroke-width="8" stroke-linecap="round"
+                stroke-dasharray="326.73" stroke-dashoffset="326.73" transform="rotate(-90 60 60)"/>
+            </svg>
+            <div class="score-ring-value">
+              <span class="score-number" id="overall-score">0</span>
+              <span class="score-max">/ 100</span>
+            </div>
+          </div>
+          <div class="score-summary">
+            <h2>Overall Health Score</h2>
+            <p id="score-verdict" class="score-verdict"></p>
+            <p id="score-description" class="score-description"></p>
+          </div>
+        </div>
+
+        <!-- Strengths & Risks -->
+        <div class="sr-grid">
+          <div>
+            <div class="section-title">Top Strengths</div>
+            <div class="strengths-list" id="strengths-list"></div>
+          </div>
+          <div>
+            <div class="section-title">Top Risks</div>
+            <div class="risks-list" id="risks-list"></div>
+          </div>
+        </div>
+
+        <!-- Sub-scores -->
+        <div class="section-title">Financial Dimensions</div>
+        <div class="sub-scores-grid" id="sub-scores-grid"></div>
+
+        <!-- Data quality -->
+        <div class="section-title">Data Quality & Validation</div>
+        <div class="quality-grid">
+          <div class="quality-card">
+            <div class="quality-summary" id="quality-summary"></div>
+            <div class="quality-documents" id="quality-documents"></div>
+          </div>
+          <div class="quality-card">
+            <div class="quality-findings" id="quality-findings"></div>
+            <div class="quality-missing" id="quality-missing"></div>
+          </div>
+        </div>
+
+        <!-- Missing Diligence -->
+        <div class="section-title" id="missing-title" style="display:none">Missing Diligence Items</div>
+        <div class="missing-items" id="missing-items"></div>
+
+        <!-- Risk Flags -->
+        <div class="section-title">Risk Flags</div>
+        <div class="risk-flags" id="risk-flags"></div>
+
+        <!-- Analytics Studio -->
+        <div class="section-title">Analytics Studio</div>
+        <div class="analytics-studio">
+          <div class="analytics-header-card">
+            <div>
+              <p class="analytics-eyebrow">Visual toolkit</p>
+              <h2>Financial Overview</h2>
+              <p class="analytics-subtitle">A cleaner analysis surface that mixes trend charts with compact operating views for concentration, leverage, and liquidity signals.</p>
+            </div>
+            <div class="analytics-chip-row">
+              <span class="analytics-chip">Trends</span>
+              <span class="analytics-chip">Concentration</span>
+              <span class="analytics-chip">Debt</span>
+              <span class="analytics-chip">Working capital</span>
+            </div>
+          </div>
+
+          <div class="analytics-kpi-grid" id="analytics-kpi-grid"></div>
+
+          <div class="analytics-tools-grid">
+            <div class="viz-card viz-card-wide">
+              <div class="viz-card-header">
+                <div>
+                  <p class="viz-kicker">Score matrix</p>
+                  <h3>Dimension Signal Map</h3>
+                </div>
+              </div>
+              <div class="signal-map" id="signal-map"></div>
+            </div>
+
+            <div class="viz-card">
+              <div class="viz-card-header">
+                <div>
+                  <p class="viz-kicker">Customer mix</p>
+                  <h3>Concentration Monitor</h3>
+                </div>
+              </div>
+              <div class="concentration-monitor" id="concentration-monitor"></div>
+            </div>
+
+            <div class="viz-card">
+              <div class="viz-card-header">
+                <div>
+                  <p class="viz-kicker">Debt ladder</p>
+                  <h3>Maturity Schedule</h3>
+                </div>
+              </div>
+              <div class="debt-ladder" id="debt-ladder"></div>
+            </div>
+          </div>
+
+          <div class="charts-grid">
+            <div class="chart-card chart-card-featured"><h3>Forecast vs. Historical</h3><canvas id="chart-forecast"></canvas></div>
+            <div class="chart-card"><h3>Revenue Trend</h3><canvas id="chart-revenue"></canvas></div>
+            <div class="chart-card"><h3>EBITDA Trend</h3><canvas id="chart-ebitda"></canvas></div>
+            <div class="chart-card chart-card-featured"><h3>Margin Analysis</h3><canvas id="chart-margins"></canvas></div>
+            <div class="chart-card"><h3>Customer Concentration</h3><canvas id="chart-concentration"></canvas></div>
+            <div class="chart-card"><h3>Expense Composition</h3><canvas id="chart-expenses"></canvas></div>
+            <div class="chart-card"><h3>Accounts Receivable Aging</h3><canvas id="chart-ar-aging"></canvas></div>
+            <div class="chart-card"><h3>Accounts Payable Aging</h3><canvas id="chart-ap-aging"></canvas></div>
+            <div class="chart-card"><h3>Debt Profile</h3><canvas id="chart-debt"></canvas></div>
+            <div class="chart-card"><h3>Working Capital Trend</h3><canvas id="chart-working-cap"></canvas></div>
+            <div class="chart-card"><h3>Leverage Metrics</h3><canvas id="chart-leverage"></canvas></div>
+            <div class="chart-card"><h3>Cash Flow Composition</h3><canvas id="chart-cashflow"></canvas></div>
+          </div>
+        </div>
+
+        <!-- Investment Summary -->
+        <div class="section-title">Investment Summary</div>
+        <div class="summary-card" id="investment-summary"></div>
+
+        <!-- Acquisition Advice -->
+        <div class="section-title">Acquisition Advice</div>
+        <div class="advice-shell">
+          <div class="advice-overview" id="advice-overview"></div>
+          <div class="advice-columns">
+            <div class="advice-column">
+              <div class="advice-column-title">Critical Before LOI</div>
+              <div class="advice-list" id="advice-critical"></div>
+            </div>
+            <div class="advice-column">
+              <div class="advice-column-title">Important During Confirmatory Diligence</div>
+              <div class="advice-list" id="advice-important"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Growth Opportunities -->
+        <div class="section-title">Growth Opportunities</div>
+        <div class="growth-shell">
+          <div class="growth-summary-card" id="growth-summary"></div>
+          <div class="growth-priority-list" id="growth-priority-list"></div>
+          <div class="growth-category-grid" id="growth-category-grid"></div>
+        </div>
+
+        <!-- Acquisition Next Steps -->
+        <div class="section-title">Acquisition Next Steps</div>
+        <div class="next-steps" id="next-steps"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
