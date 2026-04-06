@@ -1,8 +1,9 @@
 import { parseCsvFile } from './csvParser.js';
+import { parsePdfFile } from './pdfParser.js';
 import { parseXlsxFile } from './xlsxParser.js';
 import { getFileExtension } from '../../utils/fileUtils.js';
 
-export function parseUploadedFile(file, validation) {
+export async function parseUploadedFile(file, validation) {
   if (!validation.accepted) {
     return {
       status: 'skipped',
@@ -25,6 +26,10 @@ export function parseUploadedFile(file, validation) {
 
     if (extension === '.xlsx') {
       return parseXlsxFile(file);
+    }
+
+     if (extension === '.pdf') {
+      return await parsePdfFile(file);
     }
 
     return {

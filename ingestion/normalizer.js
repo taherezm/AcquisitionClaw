@@ -7,6 +7,14 @@
 // dashboard data object.
 
 import { DOC_TYPES, DOC_TYPE_LABELS, INDUSTRY_BENCHMARKS } from './schemas.js';
+import {
+  buildAmbiguityWorkflowSummary,
+  buildDocumentConfidenceDecomposition,
+  buildEntityResolutionSummary,
+  buildEvidenceResolutionSummary,
+  buildTemporalAlignmentSummary,
+} from './evidenceResolver.js';
+import { buildReconciliationSummary } from './reconciliation.js';
 import { runScoringEngine, formatDimensionsForDashboard } from '../scoring/engine.js';
 import { validateFinancialData } from './validator.js';
 
@@ -19,6 +27,7 @@ import { validateFinancialData } from './validator.js';
  */
 export function normalizeToModel(results, context) {
   const { companyName, industry } = context;
+  const reviewerSignals = context.reviewRankingSignals || null;
 
   // Index results by type (prefer highest confidence when duplicates)
   const byType = indexByType(results);
@@ -41,8 +50,19 @@ export function normalizeToModel(results, context) {
     documentTypes,
   };
 
+  const reconciliation = buildReconciliationSummary(results);
+  const evidenceResolution = buildEvidenceResolutionSummary(results, reconciliation, reviewerSignals);
+  const temporalAlignment = buildTemporalAlignmentSummary(results, evidenceResolution, reviewerSignals);
+  const entityResolution = buildEntityResolutionSummary(results, reviewerSignals);
+
   // ---- Validate normalized data before scoring ----
-  const validation = validateFinancialData({ byType, financialModel });
+  const validation = validateFinancialData({
+    byType,
+    financialModel,
+    reconciliation,
+    evidenceResolution,
+    temporalAlignment,
+  });
 
   // ---- Run scoring engine ----
   const scoring = runScoringEngine(financialModel, industry, validation);
@@ -91,7 +111,20 @@ export function normalizeToModel(results, context) {
     availableDocTypes: documentTypes,
   });
   const nextSteps = generateNextSteps(scoring.risks, scoring.dimensions);
-  const dataQuality = buildDataQualitySummary(results, validation);
+  const ambiguityWorkflows = buildAmbiguityWorkflowSummary(
+    results,
+    reconciliation,
+    evidenceResolution,
+    temporalAlignment,
+    entityResolution,
+  );
+  const dataQuality = buildDataQualitySummary(results, validation, reconciliation, {
+    evidenceResolution,
+    temporalAlignment,
+    entityResolution,
+    ambiguityWorkflows,
+    reviewerSignals,
+  });
 
   // ---- Return dashboard-ready object ----
   return {
@@ -254,12 +287,20 @@ function buildConcentration(byType) {
   const ar = byType[DOC_TYPES.AR_AGING];
   const d  = rb?.data?._single ?? {};
   const arD = ar?.data?._single ?? {};
+  const proxyCustomers = Array.isArray(arD.customers) ? arD.customers : [];
+  const proxyPercentages = proxyCustomers
+    .map((customer) => customer.percentage)
+    .filter((value) => value != null)
+    .sort((left, right) => right - left);
+  const proxyTop3Pct = proxyPercentages.length > 0
+    ? round(proxyPercentages.slice(0, 3).reduce((sum, value) => sum + value, 0), 1)
+    : null;
 
   return {
     topCustomerPct: d.topCustomerPct ?? arD.concentrationTopCustomer ?? null,
-    top3Pct:        d.top3Pct ?? null,
+    top3Pct:        d.top3Pct ?? proxyTop3Pct,
     top5Pct:        d.top5Pct ?? arD.concentrationTop5 ?? null,
-    customerCount:  d.customerCount ?? null,
+    customerCount:  d.customerCount ?? (proxyCustomers.length || null),
   };
 }
 
@@ -318,8 +359,26 @@ function buildBalanceSheetSummary(byType, periods) {
 function buildCustomerBreakdown(byType) {
   const rb = byType[DOC_TYPES.REVENUE_BREAKDOWN];
   const customers = rb?.data?._single?.customers;
-  if (!customers || customers.length === 0) return null;
-  return { customers: customers.map(c => ({ name: c.name, percentage: c.percentage })) };
+  if (customers && customers.length > 0) {
+    return {
+      customers: customers.map(c => ({ name: c.name, percentage: c.percentage })),
+      sourceLabel: rb?.data?._single?.breakdownBasis === 'service_line' ? 'Service-line revenue mix' : 'Customer revenue concentration',
+      proxy: rb?.data?._single?.breakdownBasis === 'service_line',
+    };
+  }
+
+  const arCustomers = byType[DOC_TYPES.AR_AGING]?.data?._single?.customers;
+  if (!arCustomers || arCustomers.length === 0) return null;
+
+  return {
+    customers: arCustomers
+      .filter((customer) => customer.percentage != null)
+      .sort((left, right) => (right.percentage || 0) - (left.percentage || 0))
+      .slice(0, 8)
+      .map((customer) => ({ name: customer.name, percentage: customer.percentage })),
+    sourceLabel: 'AR concentration proxy',
+    proxy: true,
+  };
 }
 
 function buildExpenseComposition(byType, periods) {
@@ -1011,7 +1070,7 @@ function generateNextSteps(risks, dimensions) {
     .map(s => ({ title: s.title, desc: s.desc }));
 }
 
-function buildDataQualitySummary(results, validation) {
+function buildDataQualitySummary(results, validation, reconciliation = null, evidenceBundle = {}) {
   const usableResults = results.filter((result) => result.usable);
   const avgConfidence = usableResults.length > 0
     ? usableResults.reduce((sum, result) => sum + (result.confidence || 0), 0) / usableResults.length
@@ -1023,11 +1082,29 @@ function buildDataQualitySummary(results, validation) {
     .map((result) => ({
       docType: result.docType,
       label: DOC_TYPE_LABELS[result.docType] || result.docType,
+      sourceFileName: result.sourceFileName || null,
+      sourceSheetName: result.sourceSheetName || null,
       confidencePct: Math.round((result.confidence || 0) * 100),
       confidenceLabel: toConfidenceLabel(result.confidence || 0),
       source: result.synthetic ? 'modeled fallback' : 'normalized upload',
       missingFields: Array.isArray(result.coverage?.missing) ? result.coverage.missing.slice(0, 4) : [],
       warningCount: Array.isArray(result.warnings) ? result.warnings.length : 0,
+      confidenceDecomposition: buildDocumentConfidenceDecomposition(result, reconciliation, evidenceBundle.reviewerSignals || null),
+      interpretability: {
+        mappedCount: result.interpretability?.mappedCount || 0,
+        derivedCount: result.interpretability?.derivedCount || 0,
+        ambiguousCount: result.interpretability?.ambiguousCount || 0,
+        unmappedCount: result.interpretability?.unmappedCount || 0,
+        lowConfidenceCount: result.interpretability?.lowConfidenceCount || 0,
+        exactMatchCount: result.interpretability?.exactMatchCount || 0,
+        heuristicMatchCount: result.interpretability?.heuristicMatchCount || 0,
+        manualMatchCount: result.interpretability?.manualMatchCount || 0,
+        needsReview: Boolean(result.interpretability?.needsReview),
+        reviewPriority: result.interpretability?.reviewPriority || 'none',
+        recommendations: result.interpretability?.recommendations || [],
+      },
+      provenancePreview: buildProvenancePreview(result.provenance),
+      reviewPacket: buildReviewPacket(result, reconciliation, evidenceBundle.reviewerSignals || null),
     }));
 
   const extractionMissing = extractionDocuments
@@ -1046,12 +1123,21 @@ function buildDataQualitySummary(results, validation) {
       modeledFallbacks: extractionDocuments.filter((document) => document.source === 'modeled fallback').length,
     },
     documents: extractionDocuments,
+    ambiguityHighlights: buildAmbiguityHighlights(results),
     validationStatus: validation.status,
     validationWarnings: validation.warnings || [],
     hardErrors: validation.hardErrors || [],
     missingDataNotes: [...(validation.missingDataNotes || []), ...extractionMissing].slice(0, 10),
     confidenceAdjustment: validation.confidenceAdjustment,
     summary: validation.summary,
+    reconciliation: reconciliation || validation.reconciliation || null,
+    evidenceResolution: evidenceBundle.evidenceResolution || null,
+    temporalAlignment: evidenceBundle.temporalAlignment || null,
+    entityResolution: evidenceBundle.entityResolution || null,
+    ambiguityWorkflows: evidenceBundle.ambiguityWorkflows || null,
+    reviewerSignals: evidenceBundle.reviewerSignals || null,
+    assumptionLedger: buildAssumptionLedger(results, validation, reconciliation, evidenceBundle),
+    confidenceRecommendations: buildConfidenceRecommendations(results, validation, reconciliation, evidenceBundle),
   };
 }
 
@@ -1086,4 +1172,406 @@ function toConfidenceLabel(value) {
   if (value >= 0.55) return 'medium';
   if (value > 0) return 'low';
   return 'none';
+}
+
+function buildProvenancePreview(provenance) {
+  if (!provenance) return null;
+  const mappedExamples = (provenance.mappedRows || []).slice(0, 3).map((entry) => ({
+    fieldName: entry.fieldName,
+    rowLabel: entry.rowLabel,
+    period: entry.period,
+    sourceType: entry.sourceType,
+  }));
+
+  return {
+    mappedExamples,
+    ambiguousRows: (provenance.ambiguousRows || []).slice(0, 2),
+    unmappedRows: (provenance.unmappedRows || []).slice(0, 3),
+    lowConfidenceRows: (provenance.lowConfidenceRows || []).slice(0, 2),
+    derivedFields: (provenance.derivedFields || []).slice(0, 3),
+  };
+}
+
+function buildReviewPacket(result, reconciliation = null, reviewerSignals = null) {
+  const provenance = result.provenance || {};
+
+  return {
+    sourceFileName: result.sourceFileName || null,
+    sourceSheetName: result.sourceSheetName || null,
+    confidenceDecomposition: buildDocumentConfidenceDecomposition(result, reconciliation, reviewerSignals),
+    mappedRows: prioritizeManualMappings(provenance.mappedRows || []).slice(0, 14).map((entry) => ({
+      fieldName: entry.fieldName,
+      rowLabel: entry.rowLabel,
+      period: entry.period,
+      sourceType: entry.sourceType,
+      matchAlias: entry.matchAlias,
+      matchType: entry.matchType,
+      matchScore: entry.matchScore,
+      matchConfidence: entry.matchConfidence,
+    })),
+    derivedFields: (provenance.derivedFields || []).slice(0, 10).map((entry) => ({
+      fieldName: entry.fieldName,
+      period: entry.period,
+      note: entry.note,
+    })),
+    ambiguousRows: (provenance.ambiguousRows || []).slice(0, 8).map((entry) => ({
+      rowLabel: entry.rowLabel,
+      rowIndex: entry.rowIndex,
+      candidates: entry.candidates || [],
+      reviewType: 'mapping_choice',
+      suggestedAction: 'Choose the correct schema field or ignore the row if it is subtotal noise.',
+    })),
+    unmappedRows: (provenance.unmappedRows || []).slice(0, 10).map((entry) => ({
+      rowLabel: entry.rowLabel,
+      rowIndex: entry.rowIndex,
+      reviewType: 'unmapped_materiality',
+      suggestedAction: 'Map the row if it is economically material; otherwise ignore it as non-operating noise.',
+    })),
+    lowConfidenceRows: (provenance.lowConfidenceRows || []).slice(0, 10).map((entry) => ({
+      rowLabel: entry.rowLabel,
+      rowIndex: entry.rowIndex,
+      fieldName: entry.fieldName,
+      alias: entry.alias,
+      score: entry.score,
+      matchType: entry.matchType,
+      reviewType: 'heuristic_confirmation',
+      suggestedAction: 'Confirm or override the heuristic mapping before trusting the normalized field.',
+    })),
+    warnings: (result.warnings || []).slice(0, 6),
+    missingFields: (result.coverage?.missing || []).slice(0, 8),
+    recommendations: result.interpretability?.recommendations || [],
+  };
+}
+
+function buildAmbiguityHighlights(results) {
+  return results
+    .filter((result) => result.provenance?.ambiguousRows?.length || result.provenance?.unmappedRows?.length || result.provenance?.lowConfidenceRows?.length)
+    .slice(0, 6)
+    .map((result) => ({
+      docType: result.docType,
+      label: DOC_TYPE_LABELS[result.docType] || result.docType,
+      ambiguousRows: (result.provenance?.ambiguousRows || []).slice(0, 2),
+      unmappedRows: (result.provenance?.unmappedRows || []).slice(0, 3),
+      lowConfidenceRows: (result.provenance?.lowConfidenceRows || []).slice(0, 2),
+    }));
+}
+
+function prioritizeManualMappings(rows = []) {
+  return [...rows].sort((left, right) => {
+    const leftScore = left.sourceType === 'manual_override' ? 0 : 1;
+    const rightScore = right.sourceType === 'manual_override' ? 0 : 1;
+    return leftScore - rightScore;
+  });
+}
+
+function buildAssumptionLedger(results, validation, reconciliation = null, evidenceBundle = {}) {
+  const entries = [];
+
+  results.forEach((result, index) => {
+    const docLabel = DOC_TYPE_LABELS[result.docType] || result.docType;
+    const sourceMetadata = result.sourceMetadata || {};
+    const sourceRef = formatSourceRef(result);
+
+    if (sourceMetadata.ocrApplied) {
+      entries.push({
+        id: `${result.docType}-ocr-${index}`,
+        category: 'ocr',
+        severity: 'medium',
+        title: `${docLabel} uses OCR-derived text`,
+        detail: `${sourceRef} required OCR because native PDF text was unavailable. OCR output should be treated as lower-confidence than digital exports.`,
+        confidenceImpact: 'medium',
+      });
+    }
+
+    if ((sourceMetadata.layoutMetadata?.columnCount || 1) > 1) {
+      entries.push({
+        id: `${result.docType}-layout-columns-${index}`,
+        category: 'layout',
+        severity: 'low',
+        title: `${docLabel} was parsed from a multi-column page`,
+        detail: `${sourceRef} required column-order reconstruction across ${sourceMetadata.layoutMetadata.columnCount} PDF columns.`,
+        confidenceImpact: 'low',
+      });
+    }
+
+    if ((sourceMetadata.layoutMetadata?.footnotes || []).length > 0) {
+      entries.push({
+        id: `${result.docType}-footnotes-${index}`,
+        category: 'footnotes',
+        severity: 'low',
+        title: `${docLabel} includes extracted footnotes`,
+        detail: `${sourceRef} surfaced ${sourceMetadata.layoutMetadata.footnotes.length} footnote-style line${sourceMetadata.layoutMetadata.footnotes.length === 1 ? '' : 's'} that may contain unit or period qualifiers.`,
+        confidenceImpact: 'low',
+      });
+    }
+
+    if (sourceMetadata.valueScale && sourceMetadata.valueScale !== 1) {
+      entries.push({
+        id: `${result.docType}-scale-${index}`,
+        category: 'units',
+        severity: 'low',
+        title: `${docLabel} values were scaled from source units`,
+        detail: `${sourceRef} was normalized using a ${sourceMetadata.valueScale.toLocaleString()}x value scale inferred from labels like "in thousands" or "in millions".`,
+        confidenceImpact: 'low',
+      });
+    }
+
+    if (sourceMetadata.sourceKind === 'sheet-section') {
+      entries.push({
+        id: `${result.docType}-segment-${index}`,
+        category: 'segmentation',
+        severity: 'low',
+        title: `${docLabel} was split from a combined sheet`,
+        detail: `${sourceRef} came from a section-level split of a larger workbook tab. Review the section boundary if totals appear incomplete.`,
+        confidenceImpact: 'low',
+      });
+    }
+
+    (result.provenance?.derivedFields || []).slice(0, 6).forEach((entry, derivedIndex) => {
+      entries.push({
+        id: `${result.docType}-derived-${index}-${derivedIndex}`,
+        category: 'derived',
+        severity: 'low',
+        title: `${docLabel} derived ${humanizeFieldName(entry.fieldName)}`,
+        detail: `${sourceRef} derived ${humanizeFieldName(entry.fieldName)}${entry.period && entry.period !== '_single' ? ` for ${entry.period}` : ''}: ${entry.note}`,
+        confidenceImpact: 'low',
+      });
+    });
+
+    (result.provenance?.lowConfidenceRows || []).slice(0, 4).forEach((entry, heuristicIndex) => {
+      entries.push({
+        id: `${result.docType}-heuristic-${index}-${heuristicIndex}`,
+        category: 'heuristic_mapping',
+        severity: 'medium',
+        title: `${docLabel} accepted a heuristic row match`,
+        detail: `${sourceRef} mapped "${entry.rowLabel}" to ${humanizeFieldName(entry.fieldName)} using a ${Math.round((entry.score || 0) * 100)}% ${entry.matchType || 'heuristic'} match.`,
+        confidenceImpact: 'medium',
+      });
+    });
+  });
+
+  (reconciliation?.findings || []).forEach((finding, index) => {
+    entries.push({
+      id: `reconciliation-${index}`,
+      category: 'reconciliation',
+      severity: finding.severity === 'hard_error' ? 'high' : finding.severity === 'warning' ? 'medium' : 'low',
+      title: finding.label || 'Cross-document reconciliation finding',
+      detail: finding.message,
+      confidenceImpact: finding.severity === 'hard_error' ? 'high' : finding.severity === 'warning' ? 'medium' : 'low',
+    });
+  });
+
+  (evidenceBundle.evidenceResolution?.conflicts || []).slice(0, 6).forEach((conflict, index) => {
+    entries.push({
+      id: `evidence-conflict-${index}`,
+      category: 'evidence_resolution',
+      severity: conflict.severity === 'high' ? 'high' : conflict.severity === 'medium' ? 'medium' : 'low',
+      title: conflict.label,
+      detail: conflict.summary,
+      confidenceImpact: conflict.severity === 'high' ? 'high' : 'medium',
+    });
+  });
+
+  (evidenceBundle.temporalAlignment?.conflicts || []).slice(0, 4).forEach((conflict, index) => {
+    entries.push({
+      id: `timeline-${index}`,
+      category: 'time_alignment',
+      severity: conflict.severity === 'high' ? 'high' : 'medium',
+      title: conflict.label,
+      detail: conflict.summary,
+      confidenceImpact: conflict.severity === 'high' ? 'high' : 'medium',
+    });
+  });
+
+  if ((evidenceBundle.reviewerSignals?.ruleCount || 0) > 0) {
+    entries.push({
+      id: 'reviewer-memory',
+      category: 'reviewer_memory',
+      severity: 'low',
+      title: 'Evidence ranking is using persisted reviewer memory',
+      detail: evidenceBundle.reviewerSignals.summary,
+      confidenceImpact: 'low',
+    });
+  }
+
+  (evidenceBundle.reviewerSignals?.noisyLabels || []).slice(0, 3).forEach((entry, index) => {
+    entries.push({
+      id: `reviewer-noise-${index}`,
+      category: 'reviewer_memory',
+      severity: 'medium',
+      title: `${humanizeFieldName(entry.docType)} label treated as likely noise`,
+      detail: `"${entry.rowLabel}" has been ignored in prior review decisions and is now de-prioritized unless explicitly remapped.`,
+      confidenceImpact: 'medium',
+    });
+  });
+
+  return entries.slice(0, 18);
+}
+
+function buildConfidenceRecommendations(results, validation, reconciliation = null, evidenceBundle = {}) {
+  const recommendations = [];
+  const docTypes = new Set(results.filter((result) => result.usable).map((result) => result.docType));
+
+  const requestedDocs = [
+    [DOC_TYPES.INCOME_STATEMENT, 'Upload a clean income statement export with explicit period headers.'],
+    [DOC_TYPES.BALANCE_SHEET, 'Upload a balance sheet with total assets, liabilities, and equity on the same basis date.'],
+    [DOC_TYPES.CASH_FLOW_STATEMENT, 'Upload a cash flow statement to improve cash-conversion confidence.'],
+    [DOC_TYPES.QOE_REPORT, 'Upload the QoE summary to support adjusted EBITDA and add-back review.'],
+    [DOC_TYPES.DEBT_SCHEDULE, 'Upload the debt schedule to tighten leverage and debt-service analysis.'],
+    [DOC_TYPES.REVENUE_BREAKDOWN, 'Upload customer or service-line concentration detail to support concentration scoring.'],
+  ];
+
+  requestedDocs.forEach(([docType, action], index) => {
+    if (docTypes.has(docType)) return;
+    recommendations.push({
+      id: `missing-doc-${index}`,
+      priority: docType === DOC_TYPES.INCOME_STATEMENT || docType === DOC_TYPES.BALANCE_SHEET ? 'high' : 'medium',
+      title: `Add ${DOC_TYPE_LABELS[docType] || docType}`,
+      action,
+      rationale: `${DOC_TYPE_LABELS[docType] || docType} is missing from the normalized document set.`,
+      expectedLift: docType === DOC_TYPES.INCOME_STATEMENT || docType === DOC_TYPES.BALANCE_SHEET ? 'large' : 'moderate',
+    });
+  });
+
+  results.forEach((result, index) => {
+    const docLabel = DOC_TYPE_LABELS[result.docType] || result.docType;
+    const sourceRef = formatSourceRef(result);
+
+    if ((result.provenance?.ambiguousRows?.length || 0) > 0 || (result.provenance?.unmappedRows?.length || 0) > 0) {
+      recommendations.push({
+        id: `mapping-review-${index}`,
+        priority: 'high',
+        title: `Resolve open row mapping issues in ${docLabel}`,
+        action: `Use the review panel to map or ignore ambiguous/unmapped rows from ${sourceRef}.`,
+        rationale: `${(result.provenance?.ambiguousRows?.length || 0) + (result.provenance?.unmappedRows?.length || 0)} row-level issues are suppressing confidence.`,
+        expectedLift: 'moderate',
+      });
+    }
+
+    if ((result.provenance?.lowConfidenceRows?.length || 0) > 0) {
+      recommendations.push({
+        id: `heuristic-review-${index}`,
+        priority: 'medium',
+        title: `Confirm heuristic matches in ${docLabel}`,
+        action: `Spot-check heuristic mappings from ${sourceRef} and convert the correct ones into explicit learned aliases.`,
+        rationale: `${result.provenance.lowConfidenceRows.length} fields were accepted through weak similarity rather than exact label matches.`,
+        expectedLift: 'moderate',
+      });
+    }
+
+    if (result.sourceMetadata?.ocrApplied) {
+      recommendations.push({
+        id: `ocr-upgrade-${index}`,
+        priority: 'medium',
+        title: `Replace OCR-derived ${docLabel} with a native export`,
+        action: `Upload an Excel/CSV export or a digital PDF for ${sourceRef} instead of a scanned page.`,
+        rationale: 'OCR text is usable, but materially less reliable for row labels, periods, and units.',
+        expectedLift: 'moderate',
+      });
+    }
+  });
+
+  (reconciliation?.findings || [])
+    .filter((finding) => finding.severity === 'warning' || finding.severity === 'hard_error')
+    .slice(0, 4)
+    .forEach((finding, index) => {
+      recommendations.push({
+        id: `reconciliation-${index}`,
+        priority: finding.severity === 'hard_error' ? 'high' : 'medium',
+        title: finding.label || 'Resolve reconciliation gap',
+        action: `Upload the support needed to reconcile this conflict and confirm that periods and units match.`,
+        rationale: finding.message,
+        expectedLift: finding.severity === 'hard_error' ? 'large' : 'moderate',
+      });
+    });
+
+  (validation?.missingDataNotes || []).slice(0, 4).forEach((note, index) => {
+    recommendations.push({
+      id: `missing-note-${index}`,
+      priority: note.impact === 'high' ? 'high' : note.impact === 'medium' ? 'medium' : 'low',
+      title: 'Close a data-quality gap',
+      action: note.message,
+      rationale: 'Validation identified this missing support as a driver of reduced confidence.',
+      expectedLift: note.impact === 'high' ? 'large' : 'moderate',
+    });
+  });
+
+  (evidenceBundle.evidenceResolution?.conflicts || []).slice(0, 4).forEach((conflict, index) => {
+    recommendations.push({
+      id: `evidence-conflict-${index}`,
+      priority: conflict.severity === 'high' ? 'high' : 'medium',
+      title: `Resolve ${conflict.label.toLowerCase()}`,
+      action: conflict.recommendedAction,
+      rationale: conflict.summary,
+      expectedLift: conflict.severity === 'high' ? 'large' : 'moderate',
+    });
+  });
+
+  (evidenceBundle.entityResolution?.ambiguousClusters || []).slice(0, 3).forEach((cluster, index) => {
+    recommendations.push({
+      id: `entity-resolution-${index}`,
+      priority: 'medium',
+      title: `Confirm ${cluster.canonicalName} entity aliases`,
+      action: 'Review the clustered aliases and confirm whether they refer to the same real-world entity.',
+      rationale: cluster.summary,
+      expectedLift: 'moderate',
+    });
+  });
+
+  if ((evidenceBundle.reviewerSignals?.ruleCount || 0) === 0) {
+    recommendations.push({
+      id: 'reviewer-memory-bootstrap',
+      priority: 'low',
+      title: 'Seed reviewer memory with a few row decisions',
+      action: 'Use the review panel to explicitly map or ignore the highest-priority ambiguous rows so future evidence ranking can learn trustworthy document families and noisy labels.',
+      rationale: 'No persisted reviewer decisions are currently available to refine evidence ranking beyond default priors.',
+      expectedLift: 'moderate',
+    });
+  }
+
+  (evidenceBundle.reviewerSignals?.noisySheets || []).slice(0, 2).forEach((entry, index) => {
+    recommendations.push({
+      id: `noisy-sheet-${index}`,
+      priority: 'medium',
+      title: `Review noisy section in ${DOC_TYPE_LABELS[entry.docType] || entry.docType}`,
+      action: `Check ${entry.sheetName} and confirm whether subtotal or memo rows should keep being ignored.`,
+      rationale: `Reviewer history shows a ${Math.round((entry.noiseRatio || 0) * 100)}% ignore rate for this section, suggesting structural noise.`,
+      expectedLift: 'moderate',
+    });
+  });
+
+  return dedupeConfidenceRecommendations(recommendations).slice(0, 10);
+}
+
+function dedupeConfidenceRecommendations(recommendations) {
+  const seen = new Set();
+  return recommendations.filter((recommendation) => {
+    const key = `${recommendation.title}::${recommendation.action}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((left, right) => recommendationPriorityScore(left.priority) - recommendationPriorityScore(right.priority));
+}
+
+function recommendationPriorityScore(priority) {
+  if (priority === 'high') return 0;
+  if (priority === 'medium') return 1;
+  return 2;
+}
+
+function formatSourceRef(result) {
+  const meta = result.sourceMetadata || {};
+  if (meta.pageNumber) return `page ${meta.pageNumber}`;
+  if (meta.segmentLabel) return meta.segmentLabel;
+  if (result.sourceSheetName) return result.sourceSheetName;
+  if (result.sourceFileName) return result.sourceFileName;
+  return DOC_TYPE_LABELS[result.docType] || result.docType;
+}
+
+function humanizeFieldName(value = '') {
+  return String(value)
+    .replace(/^__/, '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
 }

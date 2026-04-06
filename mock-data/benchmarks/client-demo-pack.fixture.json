@@ -1,0 +1,38 @@
+{
+  "id": "client-demo-pack",
+  "description": "Baseline clean search-fund pack covering the main document families.",
+  "companyContext": {
+    "companyName": "Client Demo Co",
+    "industry": "Manufacturing",
+    "ebitdaRange": "3m-5m"
+  },
+  "files": [
+    "../client-demo-pack/income_statement.csv",
+    "../client-demo-pack/balance_sheet.csv",
+    "../client-demo-pack/cash_flow_statement.csv",
+    "../client-demo-pack/tax_return.csv",
+    "../client-demo-pack/qoe_report.csv",
+    "../client-demo-pack/projections.csv",
+    "../client-demo-pack/ar_aging.csv",
+    "../client-demo-pack/ap_aging.csv",
+    "../client-demo-pack/debt_schedule.csv",
+    "../client-demo-pack/revenue_breakdown.csv"
+  ],
+  "expectations": {
+    "minAcceptedFiles": 9,
+    "minSplitDocuments": 9,
+    "minOverallScore": 68,
+    "maxOverallScore": 90,
+    "minResolvedFields": 6,
+    "minEvidenceConflicts": 4,
+    "minEntityClusters": 3,
+    "minAmbiguityWorkflows": 8,
+    "maxHardErrors": 2,
+    "selectedDocTypes": {
+      "revenue": "income_statement",
+      "ebitda": "qoe_report",
+      "totalDebt": "debt_schedule",
+      "topCustomerPct": "revenue_breakdown"
+    }
+  }
+}

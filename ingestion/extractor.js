@@ -115,11 +115,6 @@ function extractSynthetic(docType, schema, context, classConfidence) {
 // ---- Placeholder for parsed content extraction ----
 
 function extractFromBackendIngestion(fileResult, schema, docType, classConfidence, context, allowSyntheticFallback) {
-  const pipelineContent = fileResult?.normalization?.pipelineContent;
-  if (pipelineContent?.__parsed) {
-    return extractFromParsed(pipelineContent, schema, docType, classConfidence);
-  }
-
   const backendExtraction = fileResult?.extraction;
   if (backendExtraction?.usable) {
     return {
@@ -127,11 +122,21 @@ function extractFromBackendIngestion(fileResult, schema, docType, classConfidenc
       periods: backendExtraction.periods || [],
       data: backendExtraction.data || {},
       coverage: backendExtraction.coverage || { total: 0, found: 0, missing: [], percentage: 0 },
+      sourceFileName: fileResult?.file?.originalName || null,
+      sourceSheetName: fileResult?.splitDocument?.sheetName || fileResult?.classification?.primarySheetName || null,
+      sourceMetadata: backendExtraction.sourceMetadata || null,
+      provenance: backendExtraction.provenance || null,
+      interpretability: backendExtraction.interpretability || null,
       warnings: backendExtraction.warnings || [],
       confidence: round(backendExtraction.confidence ?? classConfidence),
       usable: true,
       synthetic: Boolean(backendExtraction.synthetic),
     };
+  }
+
+  const pipelineContent = fileResult?.normalization?.pipelineContent;
+  if (pipelineContent?.__parsed) {
+    return extractFromParsed(pipelineContent, schema, docType, classConfidence);
   }
 
   const backendWarnings = backendExtraction?.warnings || [];
@@ -142,6 +147,9 @@ function extractFromBackendIngestion(fileResult, schema, docType, classConfidenc
   if (!allowSyntheticFallback) {
     return {
       ...makeUnusableResult(docType),
+      provenance: backendExtraction?.provenance || null,
+      sourceMetadata: backendExtraction?.sourceMetadata || null,
+      interpretability: backendExtraction?.interpretability || null,
       warnings: [
         ...backendWarnings,
         ...reviewWarning,

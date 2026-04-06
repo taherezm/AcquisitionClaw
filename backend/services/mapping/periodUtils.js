@@ -27,12 +27,13 @@ const MONTH_LOOKUP = Object.freeze({
 
 export function detectPeriodColumns(columns = []) {
   return columns
+    .filter((column) => shouldTreatAsValuePeriodColumn(column.header))
     .map((column) => {
       const period = parsePeriodLabel(column.header);
       if (!period) return null;
 
       return {
-        columnKey: column.header,
+        columnKey: column.columnKey ?? column.header,
         periodKey: period.periodKey,
         granularity: period.granularity,
         sortValue: period.sortValue,
@@ -40,6 +41,16 @@ export function detectPeriodColumns(columns = []) {
     })
     .filter(Boolean)
     .sort((left, right) => left.sortValue - right.sortValue);
+}
+
+function shouldTreatAsValuePeriodColumn(label) {
+  const normalized = String(label || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  if (!/\b(19|20)\d{2}\b/.test(normalized) && !/\b(fy\s*)?(19|20)\d{2}\b/.test(normalized)) {
+    return true;
+  }
+
+  return !/(^|\s)(yoy|margin|mix|growth|cagr|percent|%)(\s|$)/.test(normalized);
 }
 
 export function sortPeriodKeys(periodKeys = []) {
@@ -52,6 +63,18 @@ export function inferFallbackPeriod(sheetName = '', fileName = '') {
     || '_single';
 }
 
+export function describePeriodKey(periodKey) {
+  if (periodKey === '_single') {
+    return { periodKey, granularity: 'point_in_time', sortValue: Number.MAX_SAFE_INTEGER };
+  }
+
+  return parsePeriodLabel(periodKey) || {
+    periodKey,
+    granularity: 'unknown',
+    sortValue: Number.MAX_SAFE_INTEGER,
+  };
+}
+
 function parsePeriodLabel(label) {
   const raw = String(label || '').trim();
   if (!raw) return null;
@@ -62,9 +85,15 @@ function parsePeriodLabel(label) {
     return { periodKey: 'LTM', granularity: 'ltm', sortValue: 999999 };
   }
 
-  const yearMatch = normalized.match(/^(fy\s*)?((19|20)\d{2})$/);
+  const yearMatch = normalized.match(/^(fy\s*)?((19|20)\d{2})(e)?$/);
   if (yearMatch) {
     const year = Number(yearMatch[2]);
+    return { periodKey: String(year), granularity: 'year', sortValue: year * 100 };
+  }
+
+  const yearWithinLabel = normalized.match(/(?:^|[^a-z0-9])(?:fy\s*)?((19|20)\d{2})(e)?(?:[^a-z0-9]|$)/);
+  if (yearWithinLabel) {
+    const year = Number(yearWithinLabel[1]);
     return { periodKey: String(year), granularity: 'year', sortValue: year * 100 };
   }
 

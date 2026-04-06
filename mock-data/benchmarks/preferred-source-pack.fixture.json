@@ -1,0 +1,46 @@
+{
+  "id": "preferred-source-pack",
+  "description": "Reviewer source preference should override the default revenue source ranking when the deal team explicitly trusts the tax return.",
+  "companyContext": {
+    "companyName": "Preferred Source Co",
+    "dealName": "Tax Return Revenue Override",
+    "reviewerId": "benchmark-reviewer",
+    "industry": "Manufacturing",
+    "ebitdaRange": "3m-5m"
+  },
+  "files": [
+    "../client-demo-pack/income_statement.csv",
+    "../client-demo-pack/balance_sheet.csv",
+    "../client-demo-pack/cash_flow_statement.csv",
+    "../client-demo-pack/tax_return.csv",
+    "../client-demo-pack/qoe_report.csv",
+    "../client-demo-pack/projections.csv",
+    "../client-demo-pack/ar_aging.csv",
+    "../client-demo-pack/ap_aging.csv",
+    "../client-demo-pack/debt_schedule.csv",
+    "../client-demo-pack/revenue_breakdown.csv"
+  ],
+  "reviewMemory": {
+    "sourcePreferences": [
+      { "conceptKey": "revenue", "preferredDocType": "tax_return" }
+    ]
+  },
+  "expectations": {
+    "minAcceptedFiles": 9,
+    "minSplitDocuments": 9,
+    "minOverallScore": 65,
+    "maxOverallScore": 90,
+    "minResolvedFields": 6,
+    "minEvidenceConflicts": 4,
+    "minEntityClusters": 3,
+    "minAmbiguityWorkflows": 8,
+    "maxHardErrors": 2,
+    "minReviewerLift": 1,
+    "maxFalseConfidentSelections": 0,
+    "selectedDocTypes": {
+      "revenue": "tax_return",
+      "ebitda": "qoe_report",
+      "totalDebt": "debt_schedule"
+    }
+  }
+}

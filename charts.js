@@ -81,21 +81,27 @@ function noScaleOpts(overrides = {}) {
 }
 
 function hasData(arr) {
-  return arr && arr.length > 0 && arr.some(v => v != null && v !== 0);
+  return Array.isArray(arr) && arr.length > 0 && arr.some(v => v != null && v !== 0);
+}
+
+function getArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 // ===== CHART RENDERERS =====
 
 /** 1. Revenue Trend — bar chart */
 export function chartRevenue(canvas, data) {
-  if (!hasData(data.revenue?.revenue)) return null;
+  const labels = getArray(data.revenue?.labels);
+  const revenue = getArray(data.revenue?.revenue);
+  if (!hasData(revenue) || labels.length === 0) return null;
   return new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: data.revenue.labels,
+      labels,
       datasets: [{
         label: 'Revenue ($M)',
-        data: data.revenue.revenue,
+        data: revenue,
         backgroundColor: C.blueFill,
         borderRadius: 4,
       }],
@@ -106,14 +112,16 @@ export function chartRevenue(canvas, data) {
 
 /** 2. EBITDA Trend — bar chart */
 export function chartEbitda(canvas, data) {
-  if (!hasData(data.revenue?.ebitda)) return null;
+  const labels = getArray(data.revenue?.labels);
+  const ebitda = getArray(data.revenue?.ebitda);
+  if (!hasData(ebitda) || labels.length === 0) return null;
   return new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: data.revenue.labels,
+      labels,
       datasets: [{
         label: 'EBITDA ($M)',
-        data: data.revenue.ebitda,
+        data: ebitda,
         backgroundColor: C.greenFill,
         borderRadius: 4,
       }],
@@ -124,7 +132,8 @@ export function chartEbitda(canvas, data) {
 
 /** 3. Margin Trends — line chart */
 export function chartMargins(canvas, data) {
-  if (!hasData(data.margins?.gross) && !hasData(data.margins?.ebitda)) return null;
+  const labels = getArray(data.margins?.labels);
+  if ((!hasData(data.margins?.gross) && !hasData(data.margins?.ebitda)) || labels.length === 0) return null;
   const datasets = [];
   if (hasData(data.margins.gross)) {
     datasets.push({ label: 'Gross Margin %', data: data.margins.gross, borderColor: C.blue, backgroundColor: C.blueLight, fill: true, tension: .35, pointRadius: 3, borderWidth: 2 });
@@ -137,7 +146,7 @@ export function chartMargins(canvas, data) {
   }
   return new Chart(canvas, {
     type: 'line',
-    data: { labels: data.margins.labels, datasets },
+    data: { labels, datasets },
     options: baseOpts({ y: { title: { display: true, text: '%', font: { size: 10 } } } }),
   });
 }
@@ -145,15 +154,17 @@ export function chartMargins(canvas, data) {
 /** 4. Customer Concentration — doughnut */
 export function chartConcentration(canvas, data) {
   const cust = data.customerBreakdown;
-  if (!cust || !cust.customers || cust.customers.length === 0) return null;
+  const customers = getArray(cust?.customers);
+  if (customers.length === 0) return null;
+  const shareLabel = cust.proxy ? 'of exposure' : 'of revenue';
 
   return new Chart(canvas, {
     type: 'doughnut',
     data: {
-      labels: cust.customers.map(c => c.name),
+      labels: customers.map(c => c.name),
       datasets: [{
-        data: cust.customers.map(c => c.percentage),
-        backgroundColor: C.piePalette.slice(0, cust.customers.length),
+        data: customers.map(c => c.percentage),
+        backgroundColor: C.piePalette.slice(0, customers.length),
         borderWidth: 2,
         borderColor: '#fff',
       }],
@@ -163,7 +174,7 @@ export function chartConcentration(canvas, data) {
       plugins: {
         tooltip: {
           callbacks: {
-            label: (ctx) => ` ${ctx.label}: ${ctx.parsed}% of revenue`,
+            label: (ctx) => ` ${ctx.label}: ${ctx.parsed}% ${shareLabel}`,
           },
         },
       },
@@ -174,15 +185,17 @@ export function chartConcentration(canvas, data) {
 /** 5. Expense Composition — doughnut */
 export function chartExpenses(canvas, data) {
   const exp = data.expenseComposition;
-  if (!exp || exp.labels.length === 0) return null;
+  const labels = getArray(exp?.labels);
+  const values = getArray(exp?.values);
+  if (labels.length === 0 || values.length === 0) return null;
 
   return new Chart(canvas, {
     type: 'doughnut',
     data: {
-      labels: exp.labels,
+      labels,
       datasets: [{
-        data: exp.values,
-        backgroundColor: C.piePalette.slice(0, exp.labels.length),
+        data: values,
+        backgroundColor: C.piePalette.slice(0, labels.length),
         borderWidth: 2,
         borderColor: '#fff',
       }],
@@ -203,16 +216,18 @@ export function chartExpenses(canvas, data) {
 /** 6. AR Aging — horizontal bar */
 export function chartARAging(canvas, data) {
   const ar = data.arAging;
-  if (!ar || !ar.labels.length) return null;
+  const labels = getArray(ar?.labels);
+  const values = getArray(ar?.values);
+  if (labels.length === 0 || values.length === 0) return null;
 
   return new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: ar.labels,
+      labels,
       datasets: [{
         label: '$ Amount',
-        data: ar.values,
-        backgroundColor: ar.values.map((_, i) => {
+        data: values,
+        backgroundColor: values.map((_, i) => {
           const colors = [C.greenFill, C.blueFill, C.yellowFill, C.orangeFill, C.redFill];
           return colors[i] || C.grayLight;
         }),
@@ -232,16 +247,18 @@ export function chartARAging(canvas, data) {
 /** 7. AP Aging — horizontal bar */
 export function chartAPAging(canvas, data) {
   const ap = data.apAging;
-  if (!ap || !ap.labels.length) return null;
+  const labels = getArray(ap?.labels);
+  const values = getArray(ap?.values);
+  if (labels.length === 0 || values.length === 0) return null;
 
   return new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: ap.labels,
+      labels,
       datasets: [{
         label: '$ Amount',
-        data: ap.values,
-        backgroundColor: ap.values.map((_, i) => {
+        data: values,
+        backgroundColor: values.map((_, i) => {
           const colors = [C.greenFill, C.blueFill, C.yellowFill, C.orangeFill, C.redFill];
           return colors[i] || C.grayLight;
         }),
@@ -261,16 +278,17 @@ export function chartAPAging(canvas, data) {
 /** 8. Debt Profile — horizontal stacked bar with rates */
 export function chartDebt(canvas, data) {
   const debt = data.debtProfile;
-  if (!debt || !debt.instruments || debt.instruments.length === 0) return null;
+  const instruments = getArray(debt?.instruments);
+  if (instruments.length === 0) return null;
 
   return new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: debt.instruments.map(d => d.name),
+      labels: instruments.map(d => d.name),
       datasets: [{
         label: 'Principal ($M)',
-        data: debt.instruments.map(d => d.principal),
-        backgroundColor: debt.instruments.map((_, i) => C.piePalette[i] || C.grayLight),
+        data: instruments.map(d => d.principal),
+        backgroundColor: instruments.map((_, i) => C.piePalette[i] || C.grayLight),
         borderRadius: 4,
       }],
     },
@@ -281,7 +299,7 @@ export function chartDebt(canvas, data) {
         tooltip: {
           callbacks: {
             afterLabel: (ctx) => {
-              const inst = debt.instruments[ctx.dataIndex];
+              const inst = instruments[ctx.dataIndex] || {};
               return `Rate: ${inst.rate}% · Maturity: ${inst.maturity}`;
             },
             label: (ctx) => ` $${ctx.parsed.x.toFixed(1)}M`,
@@ -295,7 +313,8 @@ export function chartDebt(canvas, data) {
 /** 9. Forecast vs Historical — combined bar + line */
 export function chartForecast(canvas, data) {
   const fc = data.forecastComparison;
-  if (!fc || fc.labels.length === 0) return null;
+  const labels = getArray(fc?.labels);
+  if (labels.length === 0) return null;
 
   const datasets = [];
 
@@ -325,7 +344,7 @@ export function chartForecast(canvas, data) {
   }
 
   // EBITDA line spanning both
-  const ebitdaLine = (fc.historicalEbitda || []).concat(fc.projectedEbitda || []);
+  const ebitdaLine = getArray(fc?.historicalEbitda).concat(getArray(fc?.projectedEbitda));
   if (hasData(ebitdaLine)) {
     datasets.push({
       label: 'EBITDA ($M)',
@@ -343,7 +362,7 @@ export function chartForecast(canvas, data) {
 
   return new Chart(canvas, {
     type: 'bar',
-    data: { labels: fc.labels, datasets },
+    data: { labels, datasets },
     options: baseOpts({
       y: { title: { display: true, text: '$ Millions', font: { size: 10 } } },
       plugins: {
@@ -362,7 +381,8 @@ export function chartForecast(canvas, data) {
 /** 10. Working Capital Trend — stacked area */
 export function chartWorkingCapital(canvas, data) {
   const wc = data.workingCapital;
-  if (!wc || wc.labels.length === 0) return null;
+  const labels = getArray(wc?.labels);
+  if (labels.length === 0) return null;
 
   const datasets = [];
 
@@ -404,7 +424,7 @@ export function chartWorkingCapital(canvas, data) {
 
   return new Chart(canvas, {
     type: 'line',
-    data: { labels: wc.labels, datasets },
+    data: { labels, datasets },
     options: baseOpts({
       y: { title: { display: true, text: '$ Millions', font: { size: 10 } } },
     }),
@@ -413,10 +433,12 @@ export function chartWorkingCapital(canvas, data) {
 
 /** 11. Leverage (kept from original) — dual-axis line */
 export function chartLeverage(canvas, data) {
-  if (!hasData(data.leverage?.debtToEbitda)) return null;
+  const labels = getArray(data.leverage?.labels);
+  const debtToEbitda = getArray(data.leverage?.debtToEbitda);
+  if (!hasData(debtToEbitda) || labels.length === 0) return null;
 
   const datasets = [
-    { label: 'Debt/EBITDA', data: data.leverage.debtToEbitda, borderColor: C.red, tension: .3, pointRadius: 3, borderWidth: 2, yAxisID: 'y' },
+    { label: 'Debt/EBITDA', data: debtToEbitda, borderColor: C.red, tension: .3, pointRadius: 3, borderWidth: 2, yAxisID: 'y' },
   ];
   if (hasData(data.leverage.interestCoverage)) {
     datasets.push(
@@ -426,7 +448,7 @@ export function chartLeverage(canvas, data) {
 
   return new Chart(canvas, {
     type: 'line',
-    data: { labels: data.leverage.labels, datasets },
+    data: { labels, datasets },
     options: baseOpts({
       y: { position: 'left', title: { display: true, text: 'Debt/EBITDA', font: { size: 10 } } },
       extraScales: {
@@ -438,16 +460,18 @@ export function chartLeverage(canvas, data) {
 
 /** 12. Cash Flow Composition (kept from original) — bar */
 export function chartCashflow(canvas, data) {
-  if (!hasData(data.cashflow?.values)) return null;
+  const values = getArray(data.cashflow?.values);
+  const labels = getArray(data.cashflow?.labels);
+  if (!hasData(values) || labels.length === 0) return null;
 
   return new Chart(canvas, {
     type: 'bar',
     data: {
-      labels: data.cashflow.labels,
+      labels,
       datasets: [{
         label: '$ Millions',
-        data: data.cashflow.values,
-        backgroundColor: data.cashflow.values.map(v => v >= 0 ? C.blueFill : C.redFill),
+        data: values,
+        backgroundColor: values.map(v => v >= 0 ? C.blueFill : C.redFill),
         borderRadius: 4,
       }],
     },

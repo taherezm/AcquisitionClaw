@@ -1,0 +1,49 @@
+{
+  "id": "ugly-pack",
+  "description": "Messy search-fund pack with title rows, unit notes, alias labels, reviewer memory, and mixed period bases.",
+  "companyContext": {
+    "companyName": "Regional HVAC Holdings",
+    "industry": "Business Services",
+    "ebitdaRange": "3m-5m"
+  },
+  "files": [
+    "ugly-pack/ugly_income_statement.csv",
+    "ugly-pack/ugly_balance_sheet.csv",
+    "ugly-pack/ugly_qoe_report.csv",
+    "ugly-pack/ugly_tax_return.csv",
+    "ugly-pack/ugly_debt_schedule.csv",
+    "ugly-pack/ugly_revenue_breakdown.csv"
+  ],
+  "reviewRules": [
+    { "docType": "income_statement", "sheetName": "ugly_income_statement", "rowLabel": "Sales / General / Admin", "action": "map", "fieldName": "sga" },
+    { "docType": "income_statement", "sheetName": "ugly_income_statement", "rowLabel": "Backlog Memo", "action": "ignore" },
+    { "docType": "balance_sheet", "sheetName": "ugly_balance_sheet", "rowLabel": "Board Bridge Note", "action": "ignore" },
+    { "docType": "qoe_report", "sheetName": "ugly_qoe_report", "rowLabel": "Adj EBITDA", "action": "map", "fieldName": "adjustedEbitda" },
+    { "docType": "qoe_report", "sheetName": "ugly_qoe_report", "rowLabel": "Total Adjustments", "action": "map", "fieldName": "totalAddBacks" },
+    { "docType": "qoe_report", "sheetName": "ugly_qoe_report", "rowLabel": "Market Owner Comp", "action": "map", "fieldName": "normalizedOwnerComp" },
+    { "docType": "tax_return", "sheetName": "ugly_tax_return", "rowLabel": "Taxable Inc", "action": "map", "fieldName": "taxableIncome" },
+    { "docType": "tax_return", "sheetName": "ugly_tax_return", "rowLabel": "Gross Receipts / Sales", "action": "map", "fieldName": "grossReceipts" },
+    { "docType": "tax_return", "sheetName": "ugly_tax_return", "rowLabel": "Officer Comp", "action": "map", "fieldName": "officerCompensation" },
+    { "docType": "debt_schedule", "sheetName": "ugly_debt_schedule", "rowLabel": "Senior Term Facility", "action": "map", "fieldName": "instruments" },
+    { "docType": "debt_schedule", "sheetName": "ugly_debt_schedule", "rowLabel": "Seller Carry Note", "action": "map", "fieldName": "instruments" },
+    { "docType": "revenue_breakdown", "sheetName": "ugly_revenue_breakdown", "rowLabel": "Other Customers", "action": "ignore" }
+  ],
+  "expectations": {
+    "minAcceptedFiles": 6,
+    "minSplitDocuments": 6,
+    "minOverallScore": 55,
+    "maxOverallScore": 90,
+    "minResolvedFields": 5,
+    "minEvidenceConflicts": 3,
+    "minTemporalConflicts": 1,
+    "minEntityClusters": 3,
+    "minAmbiguityWorkflows": 5,
+    "minReviewerRuleCount": 8,
+    "maxHardErrors": 3,
+    "selectedDocTypes": {
+      "revenue": "income_statement",
+      "ebitda": "qoe_report",
+      "totalDebt": "debt_schedule"
+    }
+  }
+}

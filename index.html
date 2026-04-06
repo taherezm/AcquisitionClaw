@@ -35,6 +35,14 @@
             <input type="text" id="company-name" placeholder="e.g. Acme Manufacturing Co.">
           </div>
           <div class="field">
+            <label for="deal-name">Deal Name <span class="optional">(optional)</span></label>
+            <input type="text" id="deal-name" placeholder="e.g. 2026 Platform Acquisition">
+          </div>
+          <div class="field">
+            <label for="reviewer-id">Reviewer ID <span class="optional">(optional)</span></label>
+            <input type="text" id="reviewer-id" placeholder="e.g. searchfund-partner-1">
+          </div>
+          <div class="field">
             <label for="industry">Industry</label>
             <select id="industry">
               <option value="">Select industry...</option>
@@ -71,7 +79,7 @@
               <line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
             <p class="drop-text">Drag & drop financial documents here</p>
-            <p class="drop-hint">CSV and XLSX are supported in v1. PDF parsing is queued for a later backend parser.</p>
+            <p class="drop-hint">CSV, XLSX, and text-readable PDFs are supported. Scanned PDFs can be OCRed, but remain lower-confidence than native exports.</p>
             <button class="btn-secondary" id="browse-btn">Browse Files</button>
             <input type="file" id="file-input" multiple accept=".csv,.xlsx,.pdf" hidden>
           </div>
@@ -177,6 +185,81 @@
           <div class="quality-card">
             <div class="quality-findings" id="quality-findings"></div>
             <div class="quality-missing" id="quality-missing"></div>
+          </div>
+        </div>
+        <div class="quality-review-card">
+          <div class="quality-review-header">
+            <div>
+              <div class="quality-review-kicker">Interpretability</div>
+              <h3>Provenance & Review Panel</h3>
+            </div>
+            <p class="quality-review-subtitle">Inspect how each normalized document was mapped, what was derived, and which rows still need human review.</p>
+          </div>
+          <div class="quality-review-tabs" id="quality-review-tabs"></div>
+          <div class="quality-review-summary" id="quality-review-summary"></div>
+          <div class="quality-review-grid">
+            <div class="quality-review-section">
+              <div class="quality-section-label">Mapped Fields</div>
+              <div id="quality-review-mapped"></div>
+            </div>
+            <div class="quality-review-section">
+              <div class="quality-section-label">Derived & Assumed</div>
+              <div id="quality-review-derived"></div>
+            </div>
+            <div class="quality-review-section quality-review-section-wide">
+              <div class="quality-section-label">Rows Requiring Review</div>
+              <div id="quality-review-issues"></div>
+            </div>
+          </div>
+        </div>
+        <div class="quality-review-card">
+          <div class="quality-review-header">
+            <div>
+              <div class="quality-review-kicker">Decision Support</div>
+              <h3>Assumptions & Confidence Plan</h3>
+            </div>
+            <p class="quality-review-subtitle">Track what the app assumed, where confidence is being spent, and what additional support would improve output reliability fastest.</p>
+          </div>
+          <div class="quality-review-grid">
+            <div class="quality-review-section">
+              <div class="quality-section-label">Assumption Ledger</div>
+              <div id="quality-assumption-ledger"></div>
+            </div>
+            <div class="quality-review-section">
+              <div class="quality-section-label">Confidence Lift Plan</div>
+              <div id="quality-confidence-plan"></div>
+            </div>
+          </div>
+        </div>
+        <div class="quality-review-card">
+          <div class="quality-review-header">
+            <div>
+              <div class="quality-review-kicker">Evidence Engine</div>
+              <h3>Conflict Resolver & Timeline Model</h3>
+            </div>
+            <p class="quality-review-subtitle">Rank competing document evidence, inspect why one source won, review period-basis conflicts, and spot entities that may still be ambiguously linked.</p>
+          </div>
+          <div class="quality-review-grid">
+            <div class="quality-review-section">
+              <div class="quality-section-label">Resolved Fields</div>
+              <div id="quality-evidence-resolution"></div>
+            </div>
+            <div class="quality-review-section">
+              <div class="quality-section-label">Temporal Alignment</div>
+              <div id="quality-temporal-alignment"></div>
+            </div>
+            <div class="quality-review-section">
+              <div class="quality-section-label">Entity Resolution</div>
+              <div id="quality-entity-resolution"></div>
+            </div>
+            <div class="quality-review-section">
+              <div class="quality-section-label">Ambiguity Workflows</div>
+              <div id="quality-ambiguity-workflows"></div>
+            </div>
+            <div class="quality-review-section">
+              <div class="quality-section-label">Reviewer Memory</div>
+              <div id="quality-reviewer-memory"></div>
+            </div>
           </div>
         </div>
 

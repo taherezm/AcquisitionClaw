@@ -17,11 +17,13 @@ export function normalizeExtractionResult({ validation, extraction, classificati
         docType: classification.docType,
         periods: extraction.periods,
         data: extraction.data,
+        sourceMetadata: extraction.sourceMetadata || null,
       },
       pipelineContent: {
         __parsed: true,
         periods: extraction.periods,
         data: extraction.data,
+        sourceMetadata: extraction.sourceMetadata || null,
       },
       notes: [],
     };

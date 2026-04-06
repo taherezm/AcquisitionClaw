@@ -29,7 +29,7 @@ export function validateUploadedFile(file) {
     return {
       accepted: false,
       status: 'deferred',
-      reason: 'PDF parsing is intentionally disabled in v1. Upload CSV or XLSX files for backend ingestion.',
+      reason: `Parsing for ${extension} is not enabled in this build yet.`,
       supportedExtensions: [...SUPPORTED_UPLOAD_EXTENSIONS],
     };
   }
@@ -37,7 +37,7 @@ export function validateUploadedFile(file) {
   return {
     accepted: false,
     status: 'rejected',
-    reason: `Unsupported file type "${extension || 'unknown'}". v1 accepts only .csv and .xlsx files.`,
+    reason: `Unsupported file type "${extension || 'unknown'}". This build accepts ${[...SUPPORTED_UPLOAD_EXTENSIONS].join(', ')} files.`,
     supportedExtensions: [...SUPPORTED_UPLOAD_EXTENSIONS],
   };
 }

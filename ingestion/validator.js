@@ -2,7 +2,13 @@ import { DOC_TYPES, DOC_TYPE_LABELS } from './schemas.js';
 
 const MAX_CONFIDENCE_PENALTY = 0.45;
 
-export function validateFinancialData({ byType, financialModel }) {
+export function validateFinancialData({
+  byType,
+  financialModel,
+  reconciliation = null,
+  evidenceResolution = null,
+  temporalAlignment = null,
+}) {
   const warnings = [];
   const hardErrors = [];
   const missingDataNotes = [];
@@ -39,6 +45,8 @@ export function validateFinancialData({ byType, financialModel }) {
   validateAgingVsBalance(context, DOC_TYPES.AP_AGING, 'totalAP', 'accountsPayable', 'ap_aging_vs_balance');
   validateDebtConsistency(context);
   validateEbitdaReasonableness(context);
+  applyReconciliationFindings(context, reconciliation);
+  applyEvidenceResolutionFindings(context, evidenceResolution, temporalAlignment);
 
   return {
     status: deriveValidationStatus({ warnings, hardErrors, missingDataNotes }),
@@ -51,6 +59,9 @@ export function validateFinancialData({ byType, financialModel }) {
       reasons: dedupeStrings(adjustmentReasons),
     },
     summary: summarizeValidation({ warnings, hardErrors, missingDataNotes, confidencePenalty }),
+    reconciliation,
+    evidenceResolution,
+    temporalAlignment,
   };
 }
 
@@ -326,6 +337,77 @@ function validateDebtConsistency(context) {
       { docType: DOC_TYPES.DEBT_SCHEDULE, relatedDocType: DOC_TYPES.BALANCE_SHEET, period: latestPeriod },
       0.05
     );
+  }
+}
+
+function applyReconciliationFindings(context, reconciliation) {
+  if (!reconciliation || !Array.isArray(reconciliation.findings)) return;
+
+  for (const finding of reconciliation.findings) {
+    if (finding.severity === 'hard_error') {
+      context.addHardError(finding.code || 'reconciliation_conflict', finding.message, {
+        docType: finding.docType,
+        relatedDocType: finding.relatedDocType,
+        label: finding.label,
+      }, 0.08);
+      continue;
+    }
+
+    if (finding.severity === 'warning') {
+      context.addWarning(finding.code || 'reconciliation_warning', finding.message, {
+        docType: finding.docType,
+        relatedDocType: finding.relatedDocType,
+        label: finding.label,
+      }, 0.04);
+      continue;
+    }
+
+    context.addMissingNote(finding.message, 'low', {
+      docType: finding.docType,
+      relatedDocType: finding.relatedDocType,
+      label: finding.label,
+    }, 0.015);
+  }
+}
+
+function applyEvidenceResolutionFindings(context, evidenceResolution, temporalAlignment) {
+  if (evidenceResolution && Array.isArray(evidenceResolution.conflicts)) {
+    evidenceResolution.conflicts.slice(0, 8).forEach((conflict) => {
+      const meta = {
+        docType: conflict.selected?.docType,
+        relatedDocType: conflict.comparedCandidate?.docType,
+        label: conflict.label,
+      };
+
+      if (conflict.severity === 'high') {
+        context.addHardError('evidence_resolution_conflict', conflict.summary, meta, 0.07);
+        return;
+      }
+
+      if (conflict.severity === 'medium') {
+        context.addWarning('evidence_resolution_conflict', conflict.summary, meta, 0.04);
+        return;
+      }
+
+      context.addMissingNote(conflict.summary, 'low', meta, 0.015);
+    });
+  }
+
+  if (temporalAlignment && Array.isArray(temporalAlignment.conflicts)) {
+    temporalAlignment.conflicts.slice(0, 6).forEach((conflict) => {
+      const meta = {
+        docType: conflict.docTypes?.[0] || null,
+        relatedDocType: conflict.docTypes?.[1] || null,
+        label: conflict.label,
+      };
+
+      if (conflict.severity === 'high') {
+        context.addWarning('temporal_alignment_conflict', conflict.summary, meta, 0.05);
+        return;
+      }
+
+      context.addMissingNote(conflict.summary, 'medium', meta, 0.02);
+    });
   }
 }
 

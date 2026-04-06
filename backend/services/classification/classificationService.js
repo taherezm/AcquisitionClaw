@@ -9,7 +9,7 @@ export function classifyUploadedFile(file, parsing) {
   }
 
   const sheetClassifications = parsing.parsedDocument.sheets.map((sheet) =>
-    classifyParsedSheet(file, sheet),
+    classifyParsedSheetLike(file, sheet),
   );
   const primarySheet = choosePrimarySheetClassification(sheetClassifications);
   const strongTypedSheets = sheetClassifications.filter((sheetResult) =>
@@ -40,10 +40,17 @@ export function classifyUploadedFile(file, parsing) {
 const THRESHOLDS = getClassificationThresholds();
 const CLASSIFICATION_RULES = getClassificationRuleSet();
 
-function classifyParsedSheet(file, sheet) {
+export function classifyParsedSheetLike(file, sheet) {
   const fileNameText = normalizeText(file.originalname);
-  const sheetNameText = normalizeText(sheet.name);
-  const headerText = normalizeText(sheet.header.join(' '));
+  const sheetNameText = normalizeText([sheet.name, sheet.segmentLabel, sheet.parentSheetName].filter(Boolean).join(' '));
+  const titleText = normalizeText(sheet.title);
+  const rowLabelText = normalizeText(
+    sheet.records
+      .slice(0, 12)
+      .map((record) => record.values?.[sheet.header[0]] ?? '')
+      .join(' '),
+  );
+  const structuralText = normalizeText(`${sheet.title || ''} ${sheet.header.join(' ')} ${rowLabelText}`);
 
   const allScores = CLASSIFICATION_RULES
     .map((rule) => {
@@ -55,13 +62,22 @@ function classifyParsedSheet(file, sheet) {
         baseScore: 0.85,
         increment: 0.1,
       });
-      const headerSignal = scoreSignalWithWeights(headerText, rule.headerKeywords, {
+      const titleSignal = scoreSignalWithWeights(titleText, [
+        ...rule.sheetNameKeywords,
+        ...rule.filenameKeywords,
+        ...rule.headerKeywords,
+      ], {
+        baseScore: 0.8,
+        increment: 0.08,
+      });
+      const headerSignal = scoreSignalWithWeights(structuralText, rule.headerKeywords, {
         baseScore: 0.45,
         increment: 0.15,
       });
       const score = round(
         (filenameSignal * THRESHOLDS.FILE_NAME_WEIGHT)
         + (sheetNameSignal * THRESHOLDS.SHEET_NAME_WEIGHT)
+        + (titleSignal * THRESHOLDS.TITLE_WEIGHT)
         + (headerSignal * THRESHOLDS.HEADER_WEIGHT),
       );
 
@@ -71,6 +87,7 @@ function classifyParsedSheet(file, sheet) {
         breakdown: {
           filenameSignal,
           sheetNameSignal,
+          titleSignal,
           headerSignal,
         },
       };
@@ -86,7 +103,8 @@ function classifyParsedSheet(file, sheet) {
   const signals = buildSignals({
     fileNameText,
     sheetNameText,
-    headers: sheet.header,
+    titleText,
+    structuralText,
     docType: top.docType,
   });
 
@@ -110,6 +128,9 @@ function classifyParsedSheet(file, sheet) {
   return {
     sheetIndex: sheet.index,
     sheetName: sheet.name,
+    segmentIndex: sheet.segmentIndex ?? null,
+    segmentLabel: sheet.segmentLabel || null,
+    sourceKind: sheet.sourceKind || 'tabular-sheet',
     docType,
     docTypeLabel: DOC_TYPE_LABELS[docType] || DOC_TYPE_LABELS[DOC_TYPES.UNKNOWN],
     confidence: round(confidence),
@@ -140,9 +161,8 @@ function choosePrimarySheetClassification(sheetClassifications) {
   return sorted[0];
 }
 
-function buildSignals({ fileNameText, sheetNameText, headers, docType }) {
+function buildSignals({ fileNameText, sheetNameText, titleText, structuralText, docType }) {
   const signals = [];
-  const headerText = normalizeText(headers.join(' '));
   const rule = CLASSIFICATION_RULES.find((candidate) => candidate.docType === docType);
 
   if (!rule) return signals;
@@ -159,9 +179,15 @@ function buildSignals({ fileNameText, sheetNameText, headers, docType }) {
     }
   }
 
+  for (const keyword of [...rule.sheetNameKeywords, ...rule.filenameKeywords]) {
+    if (titleText.includes(normalizeText(keyword))) {
+      signals.push(`Title matches "${keyword}"`);
+    }
+  }
+
   for (const keyword of rule.headerKeywords) {
-    if (headerText.includes(normalizeText(keyword))) {
-      signals.push(`Header matches "${keyword}"`);
+    if (structuralText.includes(normalizeText(keyword))) {
+      signals.push(`Header or row label matches "${keyword}"`);
     }
   }
 

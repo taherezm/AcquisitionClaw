@@ -1,7 +1,7 @@
 import path from 'node:path';
 
-export const SUPPORTED_UPLOAD_EXTENSIONS = new Set(['.csv', '.xlsx']);
-export const DEFERRED_UPLOAD_EXTENSIONS = new Set(['.pdf']);
+export const SUPPORTED_UPLOAD_EXTENSIONS = new Set(['.csv', '.xlsx', '.pdf']);
+export const DEFERRED_UPLOAD_EXTENSIONS = new Set([]);
 
 export function getFileExtension(filename = '') {
   return path.extname(filename || '').toLowerCase();

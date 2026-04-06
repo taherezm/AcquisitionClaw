@@ -2,16 +2,54 @@ import { runPipeline, getDocTypeLabel } from './ingestion/pipeline.js';
 import { classifyDocument } from './ingestion/classifier.js';
 import { DOC_TYPES } from './ingestion/schemas.js';
 import { renderAllCharts } from './charts.js';
-import { ingestFiles, buildPipelineFileDescriptors } from './api.js';
+import {
+  buildPipelineFileDescriptors,
+  createEmptyReviewMemory,
+  fetchReviewMemory,
+  ingestFiles,
+  saveReviewMemory,
+} from './api.js';
+import {
+  applyReviewOverridesToIngestionResponse,
+  buildReviewMemoryBundle,
+  getStoredConceptSuppression,
+  getStoredEntityResolution,
+  getReviewOverrideFieldOptions,
+  getStoredOverrideForRow,
+  getStoredSourcePreference,
+  getStoredTimeBasisOverride,
+  loadConceptSuppressions,
+  loadEntityResolutions,
+  loadReviewOverrides,
+  loadSourcePreferences,
+  loadTimeBasisOverrides,
+  removeConceptSuppression,
+  removeEntityResolution,
+  removeSourcePreference,
+  removeTimeBasisOverride,
+  removeReviewOverride,
+  saveConceptSuppression,
+  saveEntityResolution,
+  saveSourcePreference,
+  saveTimeBasisOverride,
+  saveReviewOverride,
+} from './ingestion/reviewOverrides.js';
+
+const REVIEWER_ID_STORAGE_KEY = 'acquisitionclaw.reviewer-id.v1';
+const DEFAULT_REVIEWER_ID = loadOrCreateReviewerId();
 
 // ===== STATE =====
 const state = {
   files: [],
   companyName: '',
+  dealName: '',
   industry: '',
   ebitdaRange: '',
+  reviewerId: DEFAULT_REVIEWER_ID,
   ingestionResult: null,
   isAnalyzing: false,
+  activeReviewDocType: null,
+  reviewMemory: createEmptyReviewMemory({ reviewerId: DEFAULT_REVIEWER_ID }),
 };
 
 // ===== DOM REFS =====
@@ -25,9 +63,98 @@ const fileList = $('#file-list');
 const uploadMessage = $('#upload-message');
 const analyzeBtn = $('#analyze-btn');
 const companyInput = $('#company-name');
+const dealInput = $('#deal-name');
+const reviewerInput = $('#reviewer-id');
 const industrySelect = $('#industry');
 const ebitdaSelect = $('#ebitda-range');
 const analyzeBtnDefaultMarkup = analyzeBtn.innerHTML;
+
+if (reviewerInput && !reviewerInput.value.trim()) {
+  reviewerInput.value = DEFAULT_REVIEWER_ID;
+}
+
+const SAFE_STATUS_CLASSES = ['high', 'medium', 'low', 'validated', 'review', 'warning', 'hard_error', 'hard-error', 'note', 'critical', 'amber', 'green', 'blue', 'red'];
+const SAFE_CONFIDENCE_CLASSES = ['high', 'medium', 'low'];
+
+function escapeHtml(value = '') {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeAttr(value = '') {
+  return escapeHtml(value).replace(/`/g, '&#96;');
+}
+
+function safeClass(value, allowed = [], fallback = '') {
+  const normalized = String(value || '').toLowerCase().trim();
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(Math.max(toFiniteNumber(value, min), min), max);
+}
+
+function sanitizeRichText(html = '') {
+  if (typeof document === 'undefined') {
+    return escapeHtml(html).replace(/\n/g, '<br>');
+  }
+
+  const template = document.createElement('template');
+  template.innerHTML = String(html || '');
+  const allowedTags = new Set(['BR', 'STRONG', 'EM', 'B', 'I', 'P', 'UL', 'OL', 'LI']);
+
+  const sanitizeNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) return;
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      node.remove();
+      return;
+    }
+
+    if (!allowedTags.has(node.tagName)) {
+      const textNode = document.createTextNode(node.textContent || '');
+      node.replaceWith(textNode);
+      return;
+    }
+
+    [...node.attributes].forEach((attribute) => node.removeAttribute(attribute.name));
+    [...node.childNodes].forEach(sanitizeNode);
+  };
+
+  [...template.content.childNodes].forEach(sanitizeNode);
+  return template.innerHTML;
+}
+
+function loadOrCreateReviewerId() {
+  if (typeof localStorage === 'undefined') return 'anonymous-reviewer';
+
+  try {
+    const existing = String(localStorage.getItem(REVIEWER_ID_STORAGE_KEY) || '').trim();
+    if (existing) return existing;
+    const generated = `reviewer-${Math.random().toString(36).slice(2, 8)}`;
+    localStorage.setItem(REVIEWER_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch (_error) {
+    return 'anonymous-reviewer';
+  }
+}
+
+function persistReviewerId(value) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(REVIEWER_ID_STORAGE_KEY, String(value || '').trim());
+  } catch (_error) {
+    // Ignore storage failures and keep the in-memory reviewer id.
+  }
+}
 
 // ===== NAVIGATION =====
 $$('.nav-btn').forEach(btn => {
@@ -59,6 +186,7 @@ function addFiles(fileArray) {
 
   setUploadMessage('');
   state.ingestionResult = null;
+  state.activeReviewDocType = null;
   for (const f of fileArray) {
     if (state.files.some(existing => existing.name === f.name && existing.size === f.size)) continue;
     state.files.push(f);
@@ -71,6 +199,7 @@ function removeFile(index) {
   if (state.isAnalyzing) return;
 
   state.ingestionResult = null;
+  state.activeReviewDocType = null;
   state.files.splice(index, 1);
   renderFileList();
   updateAnalyzeBtn();
@@ -81,9 +210,9 @@ function renderFileList() {
     const docType = detectDocType(f.name);
     return `<div class="file-item">
       <div class="file-info">
-        <span class="file-type-badge">${getFileExt(f.name)}</span>
-        <span class="file-name">${f.name}</span>
-        ${docType ? `<span class="file-doc-type">&mdash; ${docType}</span>` : ''}
+        <span class="file-type-badge">${escapeHtml(getFileExt(f.name))}</span>
+        <span class="file-name">${escapeHtml(f.name)}</span>
+        ${docType ? `<span class="file-doc-type">&mdash; ${escapeHtml(docType)}</span>` : ''}
       </div>
       <button class="file-remove" data-index="${i}" ${state.isAnalyzing ? 'disabled' : ''}>&times;</button>
     </div>`;
@@ -163,21 +292,17 @@ async function startAnalysis() {
 
   setUploadMessage('');
   state.companyName = companyInput.value.trim();
+  state.dealName = dealInput?.value.trim() || '';
   state.industry = industrySelect.options[industrySelect.selectedIndex].text;
   state.ebitdaRange = ebitdaSelect.options[ebitdaSelect.selectedIndex].text;
+  state.reviewerId = reviewerInput?.value.trim() || DEFAULT_REVIEWER_ID;
+  persistReviewerId(state.reviewerId);
   state.ebitdaRangeValue = ebitdaSelect.value; // raw value like "1m-3m"
   if (state.industry === 'Select industry...') state.industry = '';
   if (state.ebitdaRange === 'Select range...') state.ebitdaRange = '';
 
   showView('processing');
   $('#processing-company').textContent = state.companyName;
-
-  const companyContext = {
-    companyName: state.companyName,
-    industry: state.industry,
-    ebitdaRange: state.ebitdaRangeValue || '1m-3m',
-    allowDemoFallback: false,
-  };
 
   // Animate processing steps while running pipeline
   const steps = $$('#processing-steps .step');
@@ -192,19 +317,22 @@ async function startAnalysis() {
       steps[i].classList.add('active');
 
       if (i === 0) {
-        await delay(500);
+        await hydrateReviewMemoryFromBackend();
+        await delay(250);
       } else if (i === 1) {
+        const companyContext = buildCompanyContext();
         ingestResponse = await ingestFiles(state.files, companyContext);
         state.ingestionResult = ingestResponse;
 
         if (!ingestResponse.summary?.acceptedFiles) {
-          throw new Error('No supported files were accepted. Upload CSV or XLSX files for v1. PDF parsing is not implemented yet.');
+          throw new Error('No supported files were accepted. Upload CSV, XLSX, or text-readable PDF files.');
         }
 
         await delay(250);
       } else if (i === 2) {
-        const fileDescriptors = buildPipelineFileDescriptors(ingestResponse);
-        pipelineResult = runPipeline(fileDescriptors, companyContext);
+        const effectiveIngestion = applyReviewOverridesToIngestionResponse(ingestResponse, getEffectiveReviewMemory().reviewOverrides);
+        const fileDescriptors = buildPipelineFileDescriptors(effectiveIngestion);
+        pipelineResult = runPipeline(fileDescriptors, buildCompanyContext());
         await delay(300);
       } else {
         await delay(500 + Math.random() * 400);
@@ -217,7 +345,7 @@ async function startAnalysis() {
     state.lastIngestion = ingestResponse;
     state.lastDiagnostics = {
       ...(pipelineResult?.diagnostics || {}),
-      backendIngestion: ingestResponse,
+      backendIngestion: applyReviewOverridesToIngestionResponse(ingestResponse, getEffectiveReviewMemory().reviewOverrides),
     };
 
     await delay(300);
@@ -231,6 +359,141 @@ async function startAnalysis() {
   } finally {
     setAnalyzeLoading(false);
   }
+}
+
+function buildReviewScope() {
+  return {
+    companyName: state.companyName,
+    dealName: state.dealName || dealInput?.value.trim() || 'primary-deal',
+    reviewerId: state.reviewerId || reviewerInput?.value.trim() || DEFAULT_REVIEWER_ID,
+  };
+}
+
+function buildCompanyContext() {
+  const reviewMemory = getEffectiveReviewMemory();
+  return {
+    companyName: state.companyName,
+    dealName: buildReviewScope().dealName,
+    reviewerId: buildReviewScope().reviewerId,
+    industry: state.industry,
+    ebitdaRange: state.ebitdaRangeValue || '1m-3m',
+    allowDemoFallback: false,
+    reviewMemory,
+    reviewAliasRules: reviewMemory.learnedAliasRules || [],
+    reviewRankingSignals: reviewMemory.reviewerSignals || null,
+  };
+}
+
+function getEffectiveReviewMemory() {
+  const scope = buildReviewScope();
+  if (state.reviewMemory && typeof state.reviewMemory === 'object') {
+    return {
+      ...createEmptyReviewMemory(scope),
+      ...state.reviewMemory,
+      companyName: state.reviewMemory.companyName || scope.companyName,
+      dealName: state.reviewMemory.dealName || scope.dealName,
+      reviewerId: state.reviewMemory.reviewerId || scope.reviewerId,
+      reviewOverrides: Array.isArray(state.reviewMemory.reviewOverrides) ? state.reviewMemory.reviewOverrides : [],
+      sourcePreferences: Array.isArray(state.reviewMemory.sourcePreferences) ? state.reviewMemory.sourcePreferences : [],
+      conceptSuppressions: Array.isArray(state.reviewMemory.conceptSuppressions) ? state.reviewMemory.conceptSuppressions : [],
+      timeBasisOverrides: Array.isArray(state.reviewMemory.timeBasisOverrides) ? state.reviewMemory.timeBasisOverrides : [],
+      entityResolutions: Array.isArray(state.reviewMemory.entityResolutions) ? state.reviewMemory.entityResolutions : [],
+      learnedAliasRules: Array.isArray(state.reviewMemory.learnedAliasRules) ? state.reviewMemory.learnedAliasRules : [],
+      reviewerSignals: state.reviewMemory.reviewerSignals || null,
+      recentHistory: Array.isArray(state.reviewMemory.recentHistory) ? state.reviewMemory.recentHistory : [],
+    };
+  }
+  return createEmptyReviewMemory(scope);
+}
+
+async function hydrateReviewMemoryFromBackend() {
+  if (!state.companyName) {
+    state.reviewMemory = createEmptyReviewMemory(buildReviewScope());
+    return state.reviewMemory;
+  }
+
+  try {
+    state.reviewMemory = await fetchReviewMemory(buildReviewScope());
+  } catch (error) {
+    console.warn('Review memory load failed, falling back to local browser state:', error);
+    const fallbackBundle = buildReviewMemoryBundle({
+      reviewOverrides: loadReviewOverrides(),
+      sourcePreferences: loadSourcePreferences(),
+      conceptSuppressions: loadConceptSuppressions(),
+      timeBasisOverrides: loadTimeBasisOverrides(),
+      entityResolutions: loadEntityResolutions(),
+    });
+    state.reviewMemory = {
+      ...createEmptyReviewMemory(buildReviewScope()),
+      ...fallbackBundle,
+      companyName: buildReviewScope().companyName,
+      dealName: buildReviewScope().dealName,
+      reviewerId: buildReviewScope().reviewerId,
+      loadError: error.message || 'Review memory could not be loaded from the backend.',
+    };
+  }
+
+  return getEffectiveReviewMemory();
+}
+
+async function persistReviewMemoryState() {
+  if (!state.companyName) return getEffectiveReviewMemory();
+
+  const scope = buildReviewScope();
+  const currentMemory = getEffectiveReviewMemory();
+
+  try {
+    state.reviewMemory = await saveReviewMemory(scope, currentMemory);
+  } catch (error) {
+    if (/changed on the server/i.test(String(error?.message || ''))) {
+      try {
+        const latestMemory = await fetchReviewMemory(scope);
+        const mergedMemory = mergeReviewMemoryStates(latestMemory, currentMemory);
+        state.reviewMemory = await saveReviewMemory(scope, mergedMemory);
+        return getEffectiveReviewMemory();
+      } catch (mergeError) {
+        console.error('Failed to merge reviewer memory after a revision conflict:', mergeError);
+      }
+    }
+
+    console.error('Failed to persist review memory:', error);
+    state.reviewMemory = {
+      ...currentMemory,
+      loadError: error.message || 'Review memory could not be persisted to the backend.',
+    };
+  }
+
+  return getEffectiveReviewMemory();
+}
+
+function mergeReviewMemoryStates(remoteMemory, localMemory) {
+  const mergedBundle = buildReviewMemoryBundle({
+    reviewOverrides: mergeUniqueByKey(remoteMemory.reviewOverrides, localMemory.reviewOverrides, (entry) => entry.id),
+    sourcePreferences: mergeUniqueByKey(remoteMemory.sourcePreferences, localMemory.sourcePreferences, (entry) => entry.conceptKey),
+    conceptSuppressions: mergeUniqueByKey(remoteMemory.conceptSuppressions, localMemory.conceptSuppressions, (entry) => `${entry.conceptKey}::${entry.docType}::${entry.sourceRefKey || ''}`),
+    timeBasisOverrides: mergeUniqueByKey(remoteMemory.timeBasisOverrides, localMemory.timeBasisOverrides, (entry) => `${entry.docType}::${entry.sourceRefKey || ''}`),
+    entityResolutions: mergeUniqueByKey(remoteMemory.entityResolutions, localMemory.entityResolutions, (entry) => entry.id),
+  });
+
+  return {
+    ...remoteMemory,
+    ...mergedBundle,
+    companyName: localMemory.companyName || remoteMemory.companyName,
+    dealName: localMemory.dealName || remoteMemory.dealName,
+    reviewerId: localMemory.reviewerId || remoteMemory.reviewerId,
+    revision: remoteMemory.revision || 0,
+    recentHistory: remoteMemory.recentHistory || [],
+  };
+}
+
+function mergeUniqueByKey(leftItems = [], rightItems = [], buildKey) {
+  const merged = new Map();
+  [...(leftItems || []), ...(rightItems || [])].forEach((entry) => {
+    const key = buildKey(entry);
+    if (!key) return;
+    merged.set(key, entry);
+  });
+  return [...merged.values()];
 }
 
 function delay(ms) {
@@ -526,6 +789,7 @@ function getMockData() {
 // ===== DASHBOARD RENDERING =====
 function showDashboard(pipelineData) {
   const data = pipelineData || getMockData();
+  const overallScore = clampNumber(data.overallScore, 0, 100);
 
   // Update header
   $('#dash-company-name').textContent = state.companyName;
@@ -539,9 +803,9 @@ function showDashboard(pipelineData) {
   $('#nav-dashboard').disabled = false;
 
   // Overall score
-  animateScore(data.overallScore);
+  animateScore(overallScore);
   $('#score-verdict').textContent = data.verdict;
-  $('#score-verdict').style.color = scoreColor(data.overallScore);
+  $('#score-verdict').style.color = scoreColor(overallScore);
   $('#score-description').textContent = data.description;
 
   // Overall confidence badge (inject after description if present)
@@ -550,7 +814,8 @@ function showDashboard(pipelineData) {
   if (existingBadge) existingBadge.remove();
   if (data.overallConfidence) {
     const badge = document.createElement('span');
-    badge.className = `overall-confidence ${data.overallConfidence}`;
+    const confidenceClass = safeClass(data.overallConfidence, SAFE_CONFIDENCE_CLASSES, 'low');
+    badge.className = `overall-confidence ${confidenceClass}`;
     badge.textContent = `${data.overallConfidence} confidence`;
     descEl.parentElement.appendChild(badge);
   }
@@ -560,8 +825,8 @@ function showDashboard(pipelineData) {
   if (data.strengths && data.strengths.length > 0) {
     strengthsList.innerHTML = data.strengths.map(s => `
       <div class="strength-item">
-        <span class="strength-dim">${s.dimension}</span>
-        <span>${s.text}</span>
+        <span class="strength-dim">${escapeHtml(s.dimension)}</span>
+        <span>${escapeHtml(s.text)}</span>
       </div>
     `).join('');
   } else {
@@ -572,9 +837,9 @@ function showDashboard(pipelineData) {
   const risksList = $('#risks-list');
   if (data.risks && data.risks.length > 0) {
     risksList.innerHTML = data.risks.slice(0, 6).map(r => `
-      <div class="risk-item ${r.severity}">
-        <span class="risk-dim">${r.dimension}</span>
-        <span>${r.text}</span>
+      <div class="risk-item ${safeClass(r.severity, SAFE_STATUS_CLASSES, 'low')}">
+        <span class="risk-dim">${escapeHtml(r.dimension)}</span>
+        <span>${escapeHtml(r.text)}</span>
       </div>
     `).join('');
   } else {
@@ -584,21 +849,22 @@ function showDashboard(pipelineData) {
   // Sub-scores (expandable cards with explanation, metrics, logic)
   const grid = $('#sub-scores-grid');
   grid.innerHTML = data.subScores.map(s => {
+    const score = clampNumber(s.score, 0, 100);
     const metricsHtml = (s.metrics || []).map(m =>
-      `<span class="sub-score-metric"><strong>${m.name}:</strong> ${m.value}</span>`
+      `<span class="sub-score-metric"><strong>${escapeHtml(m.name)}:</strong> ${escapeHtml(m.value)}</span>`
     ).join('');
 
-    return `<div class="sub-score-card" data-key="${s.key}">
+    return `<div class="sub-score-card" data-key="${escapeAttr(s.key)}">
       <span class="sub-score-expand-icon">&#9662;</span>
-      <div class="sub-score-label">${s.label}</div>
-      <div class="sub-score-value" style="color:${scoreColor(s.score)}">${s.score}</div>
-      <div class="sub-score-bar"><div class="sub-score-bar-fill" data-width="${s.score}" style="background:${scoreColor(s.score)}"></div></div>
-      <div class="sub-score-note">${s.note}</div>
-      ${s.confidence ? `<span class="sub-score-confidence ${s.confidence}">${s.confidence} confidence</span>` : ''}
+      <div class="sub-score-label">${escapeHtml(s.label)}</div>
+      <div class="sub-score-value" style="color:${scoreColor(score)}">${score}</div>
+      <div class="sub-score-bar"><div class="sub-score-bar-fill" data-width="${score}" style="background:${scoreColor(score)}"></div></div>
+      <div class="sub-score-note">${escapeHtml(s.note)}</div>
+      ${s.confidence ? `<span class="sub-score-confidence ${safeClass(s.confidence, SAFE_CONFIDENCE_CLASSES, 'low')}">${escapeHtml(s.confidence)} confidence</span>` : ''}
       <div class="sub-score-detail">
-        <div class="sub-score-explanation">${s.explanation || ''}</div>
+        <div class="sub-score-explanation">${escapeHtml(s.explanation || '')}</div>
         ${metricsHtml ? `<div class="sub-score-metrics">${metricsHtml}</div>` : ''}
-        ${s.logic ? `<div class="sub-score-logic">${s.logic}</div>` : ''}
+        ${s.logic ? `<div class="sub-score-logic">${escapeHtml(s.logic)}</div>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -626,10 +892,10 @@ function showDashboard(pipelineData) {
     missingTitle.style.display = '';
     missingEl.innerHTML = data.missingItems.map(m => `
       <div class="missing-item">
-        <span class="missing-impact ${m.impact}">${m.impact}</span>
+        <span class="missing-impact ${safeClass(m.impact, SAFE_STATUS_CLASSES, 'note')}">${escapeHtml(m.impact)}</span>
         <div>
-          <div class="missing-text">${m.text}</div>
-          ${m.affects ? `<div class="missing-affects">Affects: ${m.affects}</div>` : ''}
+          <div class="missing-text">${escapeHtml(m.text)}</div>
+          ${m.affects ? `<div class="missing-affects">Affects: ${escapeHtml(m.affects)}</div>` : ''}
         </div>
       </div>
     `).join('');
@@ -640,9 +906,9 @@ function showDashboard(pipelineData) {
 
   // Risk flags
   $('#risk-flags').innerHTML = (data.riskFlags || []).map(r => `
-    <div class="risk-flag ${r.severity}">
-      <span class="risk-flag-severity">${r.severity}</span>
-      <span>${r.text}</span>
+    <div class="risk-flag ${safeClass(r.severity, SAFE_STATUS_CLASSES, 'low')}">
+      <span class="risk-flag-severity">${escapeHtml(r.severity)}</span>
+      <span>${escapeHtml(r.text)}</span>
     </div>
   `).join('');
 
@@ -651,8 +917,8 @@ function showDashboard(pipelineData) {
   renderAllCharts(data);
 
   // Investment summary
-  data.investmentSummary = data.investmentSummary.replace('The target', state.companyName);
-  $('#investment-summary').innerHTML = data.investmentSummary;
+  const investmentSummary = String(data.investmentSummary || '').replace('The target', state.companyName);
+  $('#investment-summary').innerHTML = sanitizeRichText(investmentSummary);
 
   // Acquisition advice
   renderAcquisitionAdvice(data.acquisitionAdvice);
@@ -665,8 +931,8 @@ function showDashboard(pipelineData) {
     <div class="next-step">
       <div class="next-step-number">${i + 1}</div>
       <div>
-        <div class="next-step-title">${s.title}</div>
-        <div class="next-step-desc">${s.desc}</div>
+        <div class="next-step-title">${escapeHtml(s.title)}</div>
+        <div class="next-step-desc">${escapeHtml(s.desc)}</div>
       </div>
     </div>
   `).join('');
@@ -694,11 +960,15 @@ function renderDataQuality(dataQuality) {
     docsEl.innerHTML = '';
     findingsEl.innerHTML = '';
     missingEl.innerHTML = '';
+    renderProvenanceReviewPanel(null);
+    renderAssumptionPanels(null);
+    renderEvidencePanels(null);
     return;
   }
 
   const extraction = dataQuality.extractionConfidence || {};
   const adjustment = dataQuality.confidenceAdjustment || {};
+  const reconciliation = dataQuality.reconciliation || {};
   summaryEl.innerHTML = `
     <div class="quality-metric">
       <div class="quality-metric-label">Extraction Confidence</div>
@@ -707,60 +977,96 @@ function renderDataQuality(dataQuality) {
     </div>
     <div class="quality-metric">
       <div class="quality-metric-label">Validation Status</div>
-      <div class="quality-metric-value">${formatValidationStatus(dataQuality.validationStatus)}</div>
-      <div class="quality-metric-note">${dataQuality.summary || 'No validation summary available.'}</div>
+      <div class="quality-metric-value">${escapeHtml(formatValidationStatus(dataQuality.validationStatus))}</div>
+      <div class="quality-metric-note">${escapeHtml(dataQuality.summary || 'No validation summary available.')}</div>
     </div>
     <div class="quality-metric">
       <div class="quality-metric-label">Confidence Adjustment</div>
-      <div class="quality-metric-value">${formatConfidenceAdjustment(adjustment.delta)}</div>
-      <div class="quality-metric-note">${formatAdjustmentNote(adjustment)}</div>
+      <div class="quality-metric-value">${escapeHtml(formatConfidenceAdjustment(adjustment.delta))}</div>
+      <div class="quality-metric-note">${escapeHtml(formatAdjustmentNote(adjustment))}</div>
+    </div>
+    <div class="quality-metric">
+      <div class="quality-metric-label">Consistency Score</div>
+      <div class="quality-metric-value">${reconciliation.consistencyScore ?? 'N/A'}</div>
+      <div class="quality-metric-note">${escapeHtml(reconciliation.summary || 'No cross-document reconciliation findings.')}</div>
     </div>
   `;
 
   docsEl.innerHTML = (dataQuality.documents || []).length > 0
     ? dataQuality.documents.map((doc) => `
-      <div class="quality-document">
+      <button class="quality-document ${state.activeReviewDocType === doc.docType ? 'active' : ''}" type="button" data-review-doc="${escapeAttr(doc.docType)}">
         <div>
-          <h4>${doc.label}</h4>
-          <div class="quality-document-meta">${doc.source}${doc.warningCount ? ` • ${doc.warningCount} extraction warning${doc.warningCount === 1 ? '' : 's'}` : ''}</div>
+          <h4>${escapeHtml(doc.label)}</h4>
+          <div class="quality-document-meta">${escapeHtml(doc.source)}${doc.warningCount ? ` • ${doc.warningCount} extraction warning${doc.warningCount === 1 ? '' : 's'}` : ''}</div>
+          <div class="quality-document-trace">
+            <span>${doc.interpretability?.mappedCount || 0} mapped</span>
+            <span>${doc.interpretability?.derivedCount || 0} derived</span>
+            <span>${doc.interpretability?.ambiguousCount || 0} ambiguous</span>
+            <span>${doc.interpretability?.unmappedCount || 0} unmapped</span>
+            <span>${doc.interpretability?.lowConfidenceCount || 0} low-confidence</span>
+          </div>
+          ${renderProvenancePreview(doc.provenancePreview)}
         </div>
         <div class="quality-doc-badges">
-          <span class="quality-badge ${doc.confidenceLabel}">${doc.confidencePct}% confidence</span>
-          <span class="quality-badge ${doc.source === 'modeled fallback' ? 'low' : 'validated'}">${doc.source}</span>
+          <span class="quality-badge ${safeClass(doc.confidenceLabel, SAFE_CONFIDENCE_CLASSES, 'low')}">${doc.confidencePct}% confidence</span>
+          <span class="quality-badge ${doc.source === 'modeled fallback' ? 'low' : 'validated'}">${escapeHtml(doc.source)}</span>
         </div>
-      </div>
+      </button>
     `).join('')
     : '<div class="empty-state">No normalized documents were available for scoring</div>';
+
+  docsEl.querySelectorAll('[data-review-doc]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeReviewDocType = button.dataset.reviewDoc;
+      renderDataQuality(dataQuality);
+    });
+  });
 
   const findings = [
     ...(dataQuality.hardErrors || []).slice(0, 3),
     ...(dataQuality.validationWarnings || []).slice(0, 4),
+    ...((dataQuality.reconciliation?.findings || []).filter((finding) => finding.severity === 'note').slice(0, 2)),
   ];
 
   findingsEl.innerHTML = `
     <div class="quality-section-label">Validation Findings</div>
     ${findings.length > 0
       ? findings.map((finding) => `
-        <div class="quality-finding ${finding.severity}">
-          <span class="quality-finding-tag">${finding.severity === 'hard_error' ? 'hard error' : 'warning'}</span>
-          <span>${finding.message}</span>
+        <div class="quality-finding ${safeClass(finding.severity, SAFE_STATUS_CLASSES, 'warning')}">
+          <span class="quality-finding-tag">${escapeHtml(finding.severity === 'hard_error' ? 'hard error' : finding.severity === 'note' ? 'note' : 'warning')}</span>
+          <span>${escapeHtml(finding.message)}</span>
         </div>
       `).join('')
       : '<div class="empty-state">Validation did not surface material issues</div>'}
   `;
 
   const notes = (dataQuality.missingDataNotes || []).slice(0, 5);
+  const ambiguity = (dataQuality.ambiguityHighlights || []).slice(0, 3);
   missingEl.innerHTML = `
     <div class="quality-section-label">Missing-Data Notes</div>
     ${notes.length > 0
       ? notes.map((note) => `
         <div class="quality-finding-note">
-          <span class="quality-finding-tag">${note.impact || 'note'}</span>
-          <span>${note.message}</span>
+          <span class="quality-finding-tag">${escapeHtml(note.impact || 'note')}</span>
+          <span>${escapeHtml(note.message)}</span>
         </div>
       `).join('')
       : '<div class="empty-state">Normalized uploads covered the core validation checks</div>'}
+    <div class="quality-section-label">Ambiguity Highlights</div>
+    ${ambiguity.length > 0
+      ? ambiguity.map((item) => `
+        <div class="quality-finding-note">
+          <span class="quality-finding-tag">review</span>
+          <span>${escapeHtml(formatAmbiguityHighlight(item))}</span>
+        </div>
+      `).join('')
+      : '<div class="empty-state">No material row-mapping ambiguity surfaced</div>'}
   `;
+
+  renderProvenanceReviewPanel(dataQuality);
+  renderDataQualityDocSelection(dataQuality);
+  renderAssumptionPanels(dataQuality);
+  renderEvidencePanels(dataQuality);
 }
 
 function renderGrowthOpportunities(growth) {
@@ -792,7 +1098,7 @@ function renderGrowthOpportunities(growth) {
         <div class="growth-overline">Value-creation view</div>
         <h3>Buy-side growth underwriting</h3>
       </div>
-      <p>${growth.summary}</p>
+      <p>${escapeHtml(growth.summary)}</p>
       <div class="growth-split-row">
         <div class="growth-split-card">
           <div class="growth-split-label">Quick wins</div>
@@ -811,17 +1117,17 @@ function renderGrowthOpportunities(growth) {
       <div class="growth-priority-card">
         <div class="growth-priority-top">
           <span class="growth-rank">P${index + 1}</span>
-          <span class="growth-category-tag">${item.category}</span>
-          <span class="advice-confidence ${item.confidence}">${item.confidence} confidence</span>
+          <span class="growth-category-tag">${escapeHtml(item.category)}</span>
+          <span class="advice-confidence ${safeClass(item.confidence, SAFE_CONFIDENCE_CLASSES, 'low')}">${escapeHtml(item.confidence)} confidence</span>
         </div>
-        <h4>${item.title}</h4>
-        <p>${item.whyItExists}</p>
+        <h4>${escapeHtml(item.title)}</h4>
+        <p>${escapeHtml(item.whyItExists)}</p>
         <div class="growth-impact-row">
-          <span class="growth-window ${toGrowthWindowClass(item.executionWindow)}">${item.executionWindow || 'timing not specified'}</span>
+          <span class="growth-window ${toGrowthWindowClass(item.executionWindow)}">${escapeHtml(item.executionWindow || 'timing not specified')}</span>
         </div>
         <div class="growth-impact-row">
           <span class="growth-impact-label">Estimated EBITDA impact</span>
-          <strong>${item.estimatedImpact}</strong>
+          <strong>${escapeHtml(item.estimatedImpact)}</strong>
         </div>
         ${renderGrowthDetailBlocks(item)}
       </div>
@@ -830,24 +1136,24 @@ function renderGrowthOpportunities(growth) {
 
   categoryGrid.innerHTML = categories.map((category) => `
     <div class="growth-category-card">
-      <div class="growth-category-title">${category.name}</div>
+      <div class="growth-category-title">${escapeHtml(category.name)}</div>
       ${category.items?.length
         ? category.items.map((item) => `
           <div class="growth-item">
             <div class="growth-item-top">
-              <h4>${item.title}</h4>
-              <span class="advice-confidence ${item.confidence}">${item.confidence} confidence</span>
+              <h4>${escapeHtml(item.title)}</h4>
+              <span class="advice-confidence ${safeClass(item.confidence, SAFE_CONFIDENCE_CLASSES, 'low')}">${escapeHtml(item.confidence)} confidence</span>
             </div>
-            <p class="growth-item-why">${item.whyItExists}</p>
+            <p class="growth-item-why">${escapeHtml(item.whyItExists)}</p>
             <div class="growth-metrics">
-              ${(item.supportingMetrics || []).map((metric) => `<span>${metric}</span>`).join('')}
+              ${(item.supportingMetrics || []).map((metric) => `<span>${escapeHtml(metric)}</span>`).join('')}
             </div>
             <div class="growth-item-bottom">
-              <span class="growth-window ${toGrowthWindowClass(item.executionWindow)}">${item.executionWindow || 'timing not specified'}</span>
+              <span class="growth-window ${toGrowthWindowClass(item.executionWindow)}">${escapeHtml(item.executionWindow || 'timing not specified')}</span>
             </div>
             <div class="growth-item-bottom">
               <span class="growth-impact-label">Estimated EBITDA impact</span>
-              <strong>${item.estimatedImpact}</strong>
+              <strong>${escapeHtml(item.estimatedImpact)}</strong>
             </div>
             ${renderGrowthDetailBlocks(item)}
           </div>
@@ -884,6 +1190,1098 @@ function formatAdjustmentNote(adjustment = {}) {
   return `${label} driven by validation and missing-data checks.`;
 }
 
+function renderProvenancePreview(preview) {
+  if (!preview) return '';
+
+  const mapped = (preview.mappedExamples || []).slice(0, 2)
+    .map((entry) => `${entry.rowLabel} -> ${entry.fieldName}${entry.period ? ` (${entry.period})` : ''}`)
+    .join(' • ');
+  const derived = (preview.derivedFields || []).slice(0, 2)
+    .map((entry) => `${entry.fieldName}${entry.period ? ` (${entry.period})` : ''}`)
+    .join(' • ');
+  const heuristic = (preview.lowConfidenceRows || []).slice(0, 2)
+    .map((entry) => `${entry.rowLabel} -> ${entry.fieldName}`)
+    .join(' • ');
+
+  return `
+    <div class="quality-document-preview">
+      ${mapped ? `<div><strong>Trace:</strong> ${escapeHtml(mapped)}</div>` : ''}
+      ${derived ? `<div><strong>Derived:</strong> ${escapeHtml(derived)}</div>` : ''}
+      ${heuristic ? `<div><strong>Heuristic:</strong> ${escapeHtml(heuristic)}</div>` : ''}
+    </div>
+  `;
+}
+
+function formatAmbiguityHighlight(item) {
+  const ambiguous = (item.ambiguousRows || []).map((row) => row.rowLabel).filter(Boolean);
+  const unmapped = (item.unmappedRows || []).map((row) => row.rowLabel).filter(Boolean);
+  const heuristic = (item.lowConfidenceRows || []).map((row) => row.rowLabel).filter(Boolean);
+
+  if (ambiguous.length > 0 && unmapped.length > 0) {
+    return `${item.label}: ambiguous rows ${ambiguous.join(', ')}; unmapped rows ${unmapped.join(', ')}.`;
+  }
+  if (ambiguous.length > 0) {
+    return `${item.label}: ambiguous rows ${ambiguous.join(', ')} require review.`;
+  }
+  if (heuristic.length > 0 && unmapped.length > 0) {
+    return `${item.label}: heuristic rows ${heuristic.join(', ')} were mapped weakly; unmapped rows ${unmapped.join(', ')} were excluded.`;
+  }
+  if (heuristic.length > 0) {
+    return `${item.label}: heuristic rows ${heuristic.join(', ')} should be spot-checked.`;
+  }
+  return `${item.label}: unmapped rows ${unmapped.join(', ')} were excluded from normalization.`;
+}
+
+function renderProvenanceReviewPanel(dataQuality) {
+  const tabsEl = $('#quality-review-tabs');
+  const summaryEl = $('#quality-review-summary');
+  const mappedEl = $('#quality-review-mapped');
+  const derivedEl = $('#quality-review-derived');
+  const issuesEl = $('#quality-review-issues');
+
+  if (!tabsEl || !summaryEl || !mappedEl || !derivedEl || !issuesEl) return;
+
+  const documents = dataQuality?.documents || [];
+  if (documents.length === 0) {
+    tabsEl.innerHTML = '';
+    summaryEl.innerHTML = '<div class="empty-state">No normalized documents available for provenance review</div>';
+    mappedEl.innerHTML = '';
+    derivedEl.innerHTML = '';
+    issuesEl.innerHTML = '';
+    return;
+  }
+
+  const preferredDoc = documents.find((doc) => doc.interpretability?.needsReview)
+    || documents[0];
+  const activeDoc = documents.find((doc) => doc.docType === state.activeReviewDocType)
+    || preferredDoc;
+
+  state.activeReviewDocType = activeDoc.docType;
+
+  tabsEl.innerHTML = documents.map((doc) => `
+    <button
+      class="quality-review-tab ${doc.docType === activeDoc.docType ? 'active' : ''}"
+      type="button"
+      data-review-tab="${escapeAttr(doc.docType)}">
+      <span>${escapeHtml(doc.label)}</span>
+      <span class="quality-review-tab-meta">${doc.confidencePct}%</span>
+    </button>
+  `).join('');
+
+  tabsEl.querySelectorAll('[data-review-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeReviewDocType = button.dataset.reviewTab;
+      renderProvenanceReviewPanel(dataQuality);
+      renderDataQualityDocSelection(dataQuality);
+    });
+  });
+
+  const review = activeDoc.reviewPacket || {};
+  const fieldOptions = getReviewOverrideFieldOptions(activeDoc.docType);
+  summaryEl.innerHTML = `
+    <div class="quality-review-stat">
+      <div class="quality-review-stat-label">Reviewing</div>
+      <div class="quality-review-stat-value">${escapeHtml(activeDoc.label)}</div>
+      <div class="quality-review-stat-note">${escapeHtml(activeDoc.source)} • ${activeDoc.confidencePct}% confidence</div>
+    </div>
+    <div class="quality-review-stat">
+      <div class="quality-review-stat-label">Missing Fields</div>
+      <div class="quality-review-stat-value">${(review.missingFields || []).length}</div>
+      <div class="quality-review-stat-note">${escapeHtml((review.missingFields || []).slice(0, 3).join(', ') || 'No material missing fields')}</div>
+    </div>
+    <div class="quality-review-stat">
+      <div class="quality-review-stat-label">Review Queue</div>
+      <div class="quality-review-stat-value">${(review.ambiguousRows || []).length + (review.unmappedRows || []).length + (review.lowConfidenceRows || []).length}</div>
+      <div class="quality-review-stat-note">${activeDoc.interpretability?.needsReview ? 'Ambiguity, excluded rows, or heuristic mappings surfaced' : 'No row-level review needed'}</div>
+    </div>
+    <div class="quality-review-stat">
+      <div class="quality-review-stat-label">Confidence Stack</div>
+      <div class="quality-review-stat-value">${review.confidenceDecomposition?.totalPct ?? activeDoc.confidencePct}%</div>
+      <div class="quality-review-stat-note">${(review.confidenceDecomposition?.factors || []).slice(0, 2).map((factor) => `${factor.label}: ${Math.round((factor.score || 0) * 100)}%`).join(' • ') || 'No decomposition available'}</div>
+    </div>
+  `;
+
+  mappedEl.innerHTML = (review.mappedRows || []).length > 0
+    ? (review.mappedRows || []).map((entry) => `
+      <div class="quality-review-item">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(humanizeFieldName(entry.fieldName))}</strong>
+          <span>${escapeHtml(entry.period && entry.period !== '_single' ? entry.period : 'point-in-time')}</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(entry.rowLabel)}</div>
+        <div class="quality-review-item-meta">${escapeHtml(`${entry.matchAlias ? `matched "${entry.matchAlias}"` : 'direct structural mapping'}${entry.matchType ? ` • ${entry.matchType}` : ''}${typeof entry.matchScore === 'number' ? ` • ${Math.round(entry.matchScore * 100)}% score` : ''}`)}</div>
+      </div>
+    `).join('')
+    : '<div class="empty-state">No mapped field traces were retained for this document</div>';
+
+  derivedEl.innerHTML = `
+    ${(review.derivedFields || []).length > 0
+      ? (review.derivedFields || []).map((entry) => `
+        <div class="quality-review-item">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(humanizeFieldName(entry.fieldName))}</strong>
+            <span>${escapeHtml(entry.period && entry.period !== '_single' ? entry.period : 'derived')}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(entry.note)}</div>
+        </div>
+      `).join('')
+      : '<div class="empty-state">No derived assumptions were required</div>'}
+    ${(review.warnings || []).length > 0
+      ? `
+        <div class="quality-review-subsection">
+          <div class="quality-section-label">Extraction Warnings</div>
+          ${(review.warnings || []).map((warning) => `
+            <div class="quality-finding-note">
+              <span class="quality-finding-tag">warning</span>
+              <span>${escapeHtml(warning)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `
+      : ''}
+    ${(review.recommendations || []).length > 0
+      ? `
+        <div class="quality-review-subsection">
+          <div class="quality-section-label">Suggested actions</div>
+          ${(review.recommendations || []).map((note) => `
+            <div class="quality-finding-note">
+              <span class="quality-finding-tag">next</span>
+              <span>${escapeHtml(note)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `
+      : ''}
+    ${(review.confidenceDecomposition?.factors || []).length > 0
+      ? `
+        <div class="quality-review-subsection">
+          <div class="quality-section-label">Confidence breakdown</div>
+          ${(review.confidenceDecomposition.factors || []).map((factor) => `
+            <div class="quality-finding-note">
+              <span class="quality-finding-tag">${Math.round((factor.score || 0) * 100)}%</span>
+              <span>${escapeHtml(factor.label)}: ${escapeHtml(factor.note)}</span>
+            </div>
+          `).join('')}
+          ${(review.confidenceDecomposition.penalties || []).map((penalty) => `
+            <div class="quality-finding-note">
+              <span class="quality-finding-tag">penalty</span>
+              <span>${escapeHtml(penalty.note)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `
+      : ''}
+  `;
+
+  const issueBlocks = [];
+  if ((review.ambiguousRows || []).length > 0) {
+    issueBlocks.push((review.ambiguousRows || []).map((entry) => `
+      <div class="quality-review-item review">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(entry.rowLabel)}</strong>
+          <span>ambiguous</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml((entry.candidates || []).map((candidate) => humanizeFieldName(candidate.fieldName)).join(' or '))}</div>
+        <div class="quality-review-item-meta">${escapeHtml(entry.suggestedAction || '')}</div>
+        ${renderOverrideControls(activeDoc, entry, fieldOptions)}
+      </div>
+    `).join(''));
+  }
+  if ((review.lowConfidenceRows || []).length > 0) {
+    issueBlocks.push((review.lowConfidenceRows || []).map((entry) => `
+      <div class="quality-review-item review">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(entry.rowLabel)}</strong>
+          <span>heuristic</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(`Mapped to ${humanizeFieldName(entry.fieldName)} using a ${Math.round((entry.score || 0) * 100)}% ${entry.matchType || 'heuristic'} match against "${entry.alias || entry.fieldName}".`)}</div>
+        <div class="quality-review-item-meta">${escapeHtml(entry.suggestedAction || '')}</div>
+        ${renderOverrideControls(activeDoc, entry, fieldOptions)}
+      </div>
+    `).join(''));
+  }
+  if ((review.unmappedRows || []).length > 0) {
+    issueBlocks.push((review.unmappedRows || []).map((entry) => `
+      <div class="quality-review-item review">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(entry.rowLabel)}</strong>
+          <span>unmapped</span>
+        </div>
+        <div class="quality-review-item-body">Excluded from normalization pending clearer schema mapping.</div>
+        <div class="quality-review-item-meta">${escapeHtml(entry.suggestedAction || '')}</div>
+        ${renderOverrideControls(activeDoc, entry, fieldOptions)}
+      </div>
+    `).join(''));
+  }
+  if ((review.missingFields || []).length > 0) {
+    issueBlocks.push(`
+      <div class="quality-review-subsection">
+        <div class="quality-section-label">Fields still missing</div>
+        <div class="quality-review-chip-row">
+          ${(review.missingFields || []).map((field) => `<span class="quality-review-chip">${escapeHtml(humanizeFieldName(field))}</span>`).join('')}
+        </div>
+      </div>
+    `);
+  }
+
+  issuesEl.innerHTML = issueBlocks.length > 0
+    ? issueBlocks.join('')
+    : '<div class="empty-state">This document did not surface row-level review issues</div>';
+
+  bindOverrideControls(activeDoc);
+}
+
+function renderDataQualityDocSelection(dataQuality) {
+  const docsEl = $('#quality-documents');
+  if (!docsEl) return;
+  docsEl.querySelectorAll('[data-review-doc]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.reviewDoc === state.activeReviewDocType);
+  });
+}
+
+function renderAssumptionPanels(dataQuality) {
+  const ledgerEl = $('#quality-assumption-ledger');
+  const planEl = $('#quality-confidence-plan');
+  if (!ledgerEl || !planEl) return;
+
+  if (!dataQuality) {
+    ledgerEl.innerHTML = '';
+    planEl.innerHTML = '';
+    return;
+  }
+
+  const ledger = dataQuality.assumptionLedger || [];
+  ledgerEl.innerHTML = ledger.length > 0
+    ? ledger.map((entry) => `
+      <div class="quality-review-item ${entry.severity === 'medium' || entry.severity === 'high' ? 'review' : ''}">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(entry.title)}</strong>
+          <span>${escapeHtml(entry.confidenceImpact || entry.severity || 'note')} impact</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(entry.detail)}</div>
+        <div class="quality-review-item-meta">${escapeHtml(entry.category)}</div>
+      </div>
+    `).join('')
+    : '<div class="empty-state">No material assumptions were logged from the current ingestion set</div>';
+
+  const plan = dataQuality.confidenceRecommendations || [];
+  planEl.innerHTML = plan.length > 0
+    ? plan.map((entry) => `
+      <div class="quality-review-item review">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(entry.title)}</strong>
+          <span>${escapeHtml(entry.priority)}</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(entry.action)}</div>
+        <div class="quality-review-item-meta">${escapeHtml(`${entry.rationale} • expected lift: ${entry.expectedLift}`)}</div>
+      </div>
+    `).join('')
+    : '<div class="empty-state">Confidence is already strong relative to the current document set</div>';
+}
+
+function renderEvidencePanels(dataQuality) {
+  const resolutionEl = $('#quality-evidence-resolution');
+  const temporalEl = $('#quality-temporal-alignment');
+  const entityEl = $('#quality-entity-resolution');
+  const workflowEl = $('#quality-ambiguity-workflows');
+  const reviewerEl = $('#quality-reviewer-memory');
+  if (!resolutionEl || !temporalEl || !entityEl || !workflowEl || !reviewerEl) return;
+
+  if (!dataQuality) {
+    resolutionEl.innerHTML = '';
+    temporalEl.innerHTML = '';
+    entityEl.innerHTML = '';
+    workflowEl.innerHTML = '';
+    reviewerEl.innerHTML = '';
+    return;
+  }
+
+  const resolvedFields = dataQuality.evidenceResolution?.resolvedFields || [];
+  resolutionEl.innerHTML = resolvedFields.length > 0
+    ? resolvedFields.map((field) => `
+      <div
+        class="quality-review-item ${field.competingCandidates?.length ? 'review' : ''}"
+        data-evidence-field="${escapeAttr(field.key || '')}"
+        data-evidence-selected-doc-type="${escapeAttr(field.selected?.docType || '')}">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(field.label)}</strong>
+          <span>${field.confidencePct}% confidence</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(field.resolutionSummary)}</div>
+        <div class="quality-review-item-meta">${escapeHtml(field.selected?.decomposition?.factors?.slice(0, 3).map((factor) => `${factor.label}: ${Math.round((factor.score || 0) * 100)}%`).join(' • ') || '')}</div>
+        ${(field.competingCandidates || []).slice(0, 2).map((candidate) => `
+          <div class="quality-finding-note">
+            <span class="quality-finding-tag">alt</span>
+            <span>${escapeHtml(`${candidate.docLabel}${candidate.periodKey ? ` (${candidate.periodKey})` : ''}: ${formatEvidenceValue(candidate.value, field.format)} at ${candidate.confidencePct}% confidence`)}</span>
+            ${renderEvidenceCandidateActionControls(field, candidate)}
+          </div>
+        `).join('')}
+        ${renderSourcePreferenceControls(field)}
+      </div>
+    `).join('')
+    : '<div class="empty-state">No ranked evidence fields were available from the current upload set</div>';
+
+  const timelines = dataQuality.temporalAlignment?.documents || [];
+  const timelineConflicts = dataQuality.temporalAlignment?.conflicts || [];
+  temporalEl.innerHTML = timelines.length > 0
+    ? `
+      ${timelines.map((timeline) => `
+        <div class="quality-review-item" data-temporal-source="${escapeAttr(timeline.sourceRefKey || '')}">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(timeline.label)}</strong>
+            <span>${escapeHtml(timeline.alignmentLabel)}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(timeline.summary)}</div>
+          ${renderTimeBasisControls(timeline)}
+        </div>
+      `).join('')}
+      ${timelineConflicts.slice(0, 4).map((conflict) => `
+        <div class="quality-review-item review">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(conflict.label)}</strong>
+            <span>${escapeHtml(conflict.severity)}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(conflict.summary)}</div>
+          <div class="quality-review-item-meta">${escapeHtml(conflict.recommendedAction || '')}</div>
+        </div>
+      `).join('')}
+    `
+    : '<div class="empty-state">No temporal alignment model was generated from the current uploads</div>';
+
+  const clusters = dataQuality.entityResolution?.clusters || [];
+  entityEl.innerHTML = clusters.length > 0
+    ? clusters.map((cluster) => `
+      <div class="quality-review-item ${cluster.aliases?.length > 1 ? 'review' : ''}" data-entity-cluster="${escapeAttr(cluster.id || '')}">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(cluster.canonicalName)}</strong>
+          <span>${escapeHtml(cluster.kind.replace(/_/g, ' '))} • ${cluster.confidencePct}%</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(cluster.summary)}</div>
+        <div class="quality-review-item-meta">${escapeHtml((cluster.aliases || []).join(', '))}</div>
+        ${renderEntityResolutionControls(cluster)}
+      </div>
+    `).join('')
+    : '<div class="empty-state">No cross-document entities were available to cluster</div>';
+
+  const workflows = dataQuality.ambiguityWorkflows?.items || [];
+  workflowEl.innerHTML = workflows.length > 0
+    ? workflows.map((item) => `
+      <div class="quality-review-item review">
+        <div class="quality-review-item-top">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.priority)}</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(item.detail)}</div>
+        <div class="quality-review-item-meta">${escapeHtml(item.recommendedAction)}</div>
+      </div>
+    `).join('')
+    : '<div class="empty-state">No ambiguity-specific workflows are open for the current upload set</div>';
+
+  const reviewerSignals = dataQuality.reviewerSignals || null;
+  const reviewerDocTypes = reviewerSignals?.docTypes || [];
+  const noisyLabels = reviewerSignals?.noisyLabels || [];
+  const fieldSignals = reviewerSignals?.fields || [];
+  const sourcePreferences = reviewerSignals?.sourcePreferences || [];
+  const conceptSuppressions = reviewerSignals?.conceptSuppressions || [];
+  const timeBasisOverrides = reviewerSignals?.timeBasisOverrides || [];
+  const entityResolutions = reviewerSignals?.entityResolutions || [];
+  const recentHistory = getEffectiveReviewMemory().recentHistory || [];
+  reviewerEl.innerHTML = reviewerSignals && (
+    (reviewerSignals.ruleCount || 0) > 0
+    || (reviewerSignals.sourcePreferenceCount || 0) > 0
+    || (reviewerSignals.conceptSuppressionCount || 0) > 0
+    || (reviewerSignals.timeBasisOverrideCount || 0) > 0
+    || (reviewerSignals.entityResolutionCount || 0) > 0
+  )
+    ? `
+      <div class="quality-review-item">
+        <div class="quality-review-item-top">
+          <strong>Reviewer ranking memory</strong>
+          <span>${(reviewerSignals.ruleCount || 0) + (reviewerSignals.explicitActionCount || 0)} saved decision${((reviewerSignals.ruleCount || 0) + (reviewerSignals.explicitActionCount || 0)) === 1 ? '' : 's'}</span>
+        </div>
+        <div class="quality-review-item-body">${escapeHtml(reviewerSignals.summary || '')}</div>
+        <div class="quality-review-item-meta">${escapeHtml(reviewerDocTypes.slice(0, 2).map((entry) => `${humanizeFieldName(entry.docType)}: ${entry.trustPct}% trust`).join(' • ') || 'No doc-family adjustments')}</div>
+      </div>
+      ${reviewerDocTypes.slice(0, 4).map((entry) => `
+        <div class="quality-review-item ${entry.ignoreCount > entry.mapCount ? 'review' : ''}">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(humanizeFieldName(entry.docType))}</strong>
+            <span>${entry.trustPct}% trust</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(entry.summary)}</div>
+          <div class="quality-review-item-meta">${escapeHtml(`adjustment ${entry.trustAdjustment >= 0 ? '+' : ''}${Math.round(entry.trustAdjustment * 100)} pts • noise ratio ${Math.round((entry.noiseRatio || 0) * 100)}%`)}</div>
+        </div>
+      `).join('')}
+      ${fieldSignals.slice(0, 3).map((entry) => `
+        <div class="quality-review-item">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(`${humanizeFieldName(entry.docType)} → ${humanizeFieldName(entry.fieldName)}`)}</strong>
+            <span>+${Math.round((entry.confidenceBoost || 0) * 100)} pts</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(`Confirmed by ${entry.mapCount} reviewer mapping${entry.mapCount === 1 ? '' : 's'} from ${entry.sourceLabels.join(', ') || 'saved labels'}.`)}</div>
+        </div>
+      `).join('')}
+      ${sourcePreferences.slice(0, 3).map((entry) => `
+        <div
+          class="quality-review-item"
+          data-reviewer-source-preference="${escapeAttr(entry.conceptKey || '')}"
+          data-preferred-doc-type="${escapeAttr(entry.preferredDocType || '')}">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(humanizeFieldName(entry.conceptKey))}</strong>
+            <span>${escapeHtml(humanizeFieldName(entry.preferredDocType))}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(`Reviewer memory is explicitly preferring ${humanizeFieldName(entry.preferredDocType)} when resolving ${humanizeFieldName(entry.conceptKey)} conflicts.`)}</div>
+        </div>
+      `).join('')}
+      ${conceptSuppressions.slice(0, 3).map((entry) => `
+        <div class="quality-review-item review">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(humanizeFieldName(entry.conceptKey))}</strong>
+            <span>${escapeHtml(humanizeFieldName(entry.docType))}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(`Reviewer memory is suppressing ${humanizeFieldName(entry.docType)} for ${humanizeFieldName(entry.conceptKey)}${entry.sourceRefLabel ? ` (${entry.sourceRefLabel})` : ''}.`)}</div>
+        </div>
+      `).join('')}
+      ${timeBasisOverrides.slice(0, 3).map((entry) => `
+        <div class="quality-review-item">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(humanizeFieldName(entry.docType))}</strong>
+            <span>${escapeHtml(entry.basis.replace(/_/g, ' '))}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(`Reviewer memory is forcing ${entry.sourceRefLabel || entry.sourceRefKey} to be interpreted as ${entry.basis.replace(/_/g, ' ')} evidence.`)}</div>
+        </div>
+      `).join('')}
+      ${entityResolutions.slice(0, 3).map((entry) => `
+        <div class="quality-review-item">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(entry.canonicalName)}</strong>
+            <span>${escapeHtml(entry.kind.replace(/_/g, ' '))}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(`Reviewer memory confirmed ${entry.aliases.join(', ')} as one entity cluster.`)}</div>
+        </div>
+      `).join('')}
+      ${noisyLabels.slice(0, 3).map((entry) => `
+        <div class="quality-review-item review">
+          <div class="quality-review-item-top">
+            <strong>${escapeHtml(entry.rowLabel)}</strong>
+            <span>${entry.noisePct}% noise</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(`Reviewer history usually ignores this ${humanizeFieldName(entry.docType)} label, so it is de-prioritized during ranking unless explicitly remapped.`)}</div>
+          <div class="quality-review-item-meta">${escapeHtml((entry.mappedFields || []).length > 0 ? `mapped exceptions: ${entry.mappedFields.map((field) => humanizeFieldName(field)).join(', ')}` : 'No confirmed mapped exceptions')}</div>
+        </div>
+      `).join('')}
+      ${recentHistory.slice(0, 3).map((entry) => `
+        <div class="quality-review-item">
+          <div class="quality-review-item-top">
+            <strong>Revision ${escapeHtml(entry.revision)}</strong>
+            <span>${escapeHtml(entry.updatedBy || 'reviewer')}</span>
+          </div>
+          <div class="quality-review-item-body">${escapeHtml(entry.summary || '')}</div>
+          <div class="quality-review-item-meta">${escapeHtml(entry.updatedAt || '')}</div>
+        </div>
+      `).join('')}
+    `
+    : '<div class="empty-state">No reviewer memory yet. Use the review panel to map or ignore ambiguous rows and the evidence ranker will start learning from those decisions.</div>';
+
+  bindSourcePreferenceControls();
+  bindEvidenceCandidateControls();
+  bindTimeBasisControls();
+  bindEntityResolutionControls();
+}
+
+function humanizeFieldName(value = '') {
+  return String(value)
+    .replace(/^__/, '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatEvidenceValue(value, format = 'currency') {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) return 'N/A';
+  if (format === 'percentage') return `${Math.round(numeric * 10) / 10}%`;
+  return `$${Math.round(numeric).toLocaleString()}`;
+}
+
+function applyReviewMemoryUpdate(updates = {}) {
+  const reviewMemory = getEffectiveReviewMemory();
+  const scope = buildReviewScope();
+  state.reviewMemory = {
+    ...reviewMemory,
+    ...buildReviewMemoryBundle({
+      reviewOverrides: updates.reviewOverrides ?? reviewMemory.reviewOverrides,
+      sourcePreferences: updates.sourcePreferences ?? reviewMemory.sourcePreferences,
+      conceptSuppressions: updates.conceptSuppressions ?? reviewMemory.conceptSuppressions,
+      timeBasisOverrides: updates.timeBasisOverrides ?? reviewMemory.timeBasisOverrides,
+      entityResolutions: updates.entityResolutions ?? reviewMemory.entityResolutions,
+    }),
+    companyName: scope.companyName,
+    dealName: scope.dealName,
+    reviewerId: scope.reviewerId,
+    revision: reviewMemory.revision || 0,
+    recentHistory: reviewMemory.recentHistory || [],
+  };
+  return state.reviewMemory;
+}
+
+function renderEvidenceCandidateActionControls(field, candidate) {
+  const reviewMemory = getEffectiveReviewMemory();
+  const suppression = getStoredConceptSuppression({
+    conceptKey: field.key,
+    docType: candidate.docType,
+    sourceRefKey: candidate.sourceRefKey || '',
+  }, reviewMemory.conceptSuppressions);
+
+  return `
+    <div class="quality-inline-actions">
+      <button
+        class="quality-override-btn subtle"
+        type="button"
+        data-evidence-trust="${escapeAttr(field.key)}"
+        data-doc-type="${escapeAttr(candidate.docType || '')}">
+        Trust source
+      </button>
+      <button
+        class="quality-override-btn subtle"
+        type="button"
+        data-evidence-suppress="${escapeAttr(field.key)}"
+        data-doc-type="${escapeAttr(candidate.docType || '')}"
+        data-source-ref-key="${escapeAttr(candidate.sourceRefKey || '')}"
+        data-source-ref-label="${escapeAttr(candidate.sourceRef || '')}">
+        ${suppression ? 'Suppressed' : 'Suppress'}
+      </button>
+      ${suppression
+        ? `
+          <button
+            class="quality-override-btn subtle"
+            type="button"
+            data-evidence-unsuppress="${escapeAttr(field.key)}"
+            data-doc-type="${escapeAttr(candidate.docType || '')}"
+            data-source-ref-key="${escapeAttr(candidate.sourceRefKey || '')}">
+            Clear
+          </button>
+        `
+        : ''}
+    </div>
+  `;
+}
+
+function renderTimeBasisControls(timeline) {
+  if (!timeline?.docType || !timeline?.sourceRefKey) return '';
+  const reviewMemory = getEffectiveReviewMemory();
+  const existing = getStoredTimeBasisOverride({
+    docType: timeline.docType,
+    sourceRefKey: timeline.sourceRefKey,
+    basis: timeline.basis,
+  }, reviewMemory.timeBasisOverrides);
+  const value = existing?.basis || timeline.basis || '';
+
+  return `
+    <div class="quality-override-controls">
+      <select class="quality-override-select" data-time-basis-select="${escapeAttr(timeline.sourceRefKey)}">
+        ${['historical', 'ltm', 'point_in_time', 'forecast'].map((basis) => `
+          <option value="${escapeAttr(basis)}" ${value === basis ? 'selected' : ''}>${escapeHtml(humanizeFieldName(basis))}</option>
+        `).join('')}
+      </select>
+      <button
+        class="quality-override-btn"
+        type="button"
+        data-time-basis-save="${escapeAttr(timeline.sourceRefKey)}"
+        data-doc-type="${escapeAttr(timeline.docType || '')}"
+        data-source-ref-label="${escapeAttr(timeline.sourceRef || '')}">
+        Save basis
+      </button>
+      ${existing
+        ? `
+          <button
+            class="quality-override-btn subtle"
+            type="button"
+            data-time-basis-clear="${escapeAttr(timeline.sourceRefKey)}"
+            data-doc-type="${escapeAttr(timeline.docType || '')}">
+            Clear
+          </button>
+        `
+        : ''}
+    </div>
+  `;
+}
+
+function renderEntityResolutionControls(cluster) {
+  if (!cluster || !Array.isArray(cluster.aliases) || cluster.aliases.length < 2) return '';
+  const reviewMemory = getEffectiveReviewMemory();
+  const existing = getStoredEntityResolution({
+    kind: cluster.kind,
+    canonicalName: cluster.canonicalName,
+    aliases: cluster.aliases,
+  }, reviewMemory.entityResolutions);
+
+  return `
+    <div class="quality-override-controls">
+      <select class="quality-override-select" data-entity-resolution-select="${escapeAttr(cluster.id || '')}">
+        ${cluster.aliases.map((alias) => `
+          <option value="${escapeAttr(alias)}" ${(existing?.canonicalName || cluster.canonicalName) === alias ? 'selected' : ''}>${escapeHtml(alias)}</option>
+        `).join('')}
+      </select>
+      <button
+        class="quality-override-btn"
+        type="button"
+        data-entity-resolution-save="${escapeAttr(cluster.id || '')}"
+        data-entity-kind="${escapeAttr(cluster.kind || '')}"
+        data-entity-aliases="${escapeAttr(JSON.stringify(cluster.aliases || []))}">
+        Confirm aliases
+      </button>
+      ${existing
+        ? `
+          <button
+            class="quality-override-btn subtle"
+            type="button"
+            data-entity-resolution-clear="${escapeAttr(cluster.id || '')}"
+            data-entity-kind="${escapeAttr(cluster.kind || '')}"
+            data-entity-aliases="${escapeAttr(JSON.stringify(cluster.aliases || []))}">
+            Clear
+          </button>
+        `
+        : ''}
+    </div>
+  `;
+}
+
+function renderOverrideControls(doc, entry, fieldOptions) {
+  const rowKey = encodeURIComponent(entry.rowLabel);
+  const reviewOverrides = getEffectiveReviewMemory().reviewOverrides;
+  const existingMap = getStoredOverrideForRow({
+    docType: doc.docType,
+    sheetName: doc.sourceSheetName,
+    rowLabel: entry.rowLabel,
+    action: 'map',
+  }, reviewOverrides);
+  const existingIgnore = getStoredOverrideForRow({
+    docType: doc.docType,
+    sheetName: doc.sourceSheetName,
+    rowLabel: entry.rowLabel,
+    action: 'ignore',
+  }, reviewOverrides);
+
+  return `
+    <div class="quality-override-controls">
+      <select class="quality-override-select" data-override-select="${escapeAttr(rowKey)}">
+        <option value="">Map to field…</option>
+        ${fieldOptions.map((option) => `
+          <option value="${escapeAttr(option.value)}" ${existingMap?.fieldName === option.value ? 'selected' : ''}>
+            ${escapeHtml(option.label)}${option.required ? ' (core)' : ''}
+          </option>
+        `).join('')}
+      </select>
+      <button class="quality-override-btn" type="button" data-override-map="${escapeAttr(rowKey)}">Save mapping</button>
+      <button class="quality-override-btn subtle" type="button" data-override-ignore="${escapeAttr(rowKey)}">${existingIgnore ? 'Ignored' : 'Ignore row'}</button>
+      ${(existingMap || existingIgnore)
+        ? `<button class="quality-override-btn subtle" type="button" data-override-clear="${escapeAttr(rowKey)}">Clear</button>`
+        : ''}
+    </div>
+  `;
+}
+
+function renderSourcePreferenceControls(field) {
+  if (!field || !Array.isArray(field.candidates) || field.candidates.length < 2) return '';
+
+  const reviewMemory = getEffectiveReviewMemory();
+  const existingPreference = getStoredSourcePreference({
+    conceptKey: field.key,
+    preferredDocType: (reviewMemory.sourcePreferences || []).find((entry) => entry.conceptKey === field.key)?.preferredDocType || '',
+  }, reviewMemory.sourcePreferences);
+  const candidates = dedupeSourcePreferenceCandidates(field.candidates);
+
+  return `
+    <div class="quality-override-controls">
+      <select class="quality-override-select" data-source-preference-select="${escapeAttr(field.key)}">
+        <option value="">Prefer source…</option>
+        ${candidates.map((candidate) => `
+          <option value="${escapeAttr(candidate.docType)}" ${existingPreference?.preferredDocType === candidate.docType ? 'selected' : ''}>
+            ${escapeHtml(candidate.docLabel)}${candidate.periodKey ? ` (${candidate.periodKey})` : ''}
+          </option>
+        `).join('')}
+      </select>
+      <button class="quality-override-btn" type="button" data-source-preference-save="${escapeAttr(field.key)}">Save source</button>
+      ${existingPreference
+        ? `<button class="quality-override-btn subtle" type="button" data-source-preference-clear="${escapeAttr(field.key)}">Clear</button>`
+        : ''}
+    </div>
+  `;
+}
+
+function dedupeSourcePreferenceCandidates(candidates = []) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    if (!candidate?.docType || seen.has(candidate.docType)) return false;
+    seen.add(candidate.docType);
+    return true;
+  });
+}
+
+function bindSourcePreferenceControls() {
+  document.querySelectorAll('[data-source-preference-save]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const conceptKey = button.dataset.sourcePreferenceSave;
+      const select = document.querySelector(`[data-source-preference-select="${cssEscape(conceptKey)}"]`);
+      const preferredDocType = select?.value || '';
+      if (!preferredDocType) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextSourcePreferences = saveSourcePreference({
+        conceptKey,
+        preferredDocType,
+      }, {
+        preferences: reviewMemory.sourcePreferences,
+        persist: false,
+      });
+      state.reviewMemory = {
+        ...reviewMemory,
+        ...buildReviewMemoryBundle({
+          reviewOverrides: reviewMemory.reviewOverrides,
+          sourcePreferences: nextSourcePreferences,
+          conceptSuppressions: reviewMemory.conceptSuppressions,
+          timeBasisOverrides: reviewMemory.timeBasisOverrides,
+          entityResolutions: reviewMemory.entityResolutions,
+        }),
+        companyName: state.companyName,
+        dealName: buildReviewScope().dealName,
+        reviewerId: buildReviewScope().reviewerId,
+      };
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-source-preference-clear]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const conceptKey = button.dataset.sourcePreferenceClear;
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextSourcePreferences = removeSourcePreference({
+        conceptKey,
+      }, {
+        preferences: reviewMemory.sourcePreferences,
+        persist: false,
+      });
+      state.reviewMemory = {
+        ...reviewMemory,
+        ...buildReviewMemoryBundle({
+          reviewOverrides: reviewMemory.reviewOverrides,
+          sourcePreferences: nextSourcePreferences,
+          conceptSuppressions: reviewMemory.conceptSuppressions,
+          timeBasisOverrides: reviewMemory.timeBasisOverrides,
+          entityResolutions: reviewMemory.entityResolutions,
+        }),
+        companyName: state.companyName,
+        dealName: buildReviewScope().dealName,
+        reviewerId: buildReviewScope().reviewerId,
+      };
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+}
+
+function bindEvidenceCandidateControls() {
+  document.querySelectorAll('[data-evidence-trust]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const conceptKey = button.dataset.evidenceTrust;
+      const preferredDocType = button.dataset.docType || '';
+      if (!conceptKey || !preferredDocType) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextSourcePreferences = saveSourcePreference({
+        conceptKey,
+        preferredDocType,
+      }, {
+        preferences: reviewMemory.sourcePreferences,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ sourcePreferences: nextSourcePreferences });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-evidence-suppress]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const conceptKey = button.dataset.evidenceSuppress;
+      const docType = button.dataset.docType || '';
+      if (!conceptKey || !docType) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextSuppressions = saveConceptSuppression({
+        conceptKey,
+        docType,
+        sourceRefKey: button.dataset.sourceRefKey || '',
+        sourceRefLabel: button.dataset.sourceRefLabel || '',
+      }, {
+        suppressions: reviewMemory.conceptSuppressions,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ conceptSuppressions: nextSuppressions });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-evidence-unsuppress]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const conceptKey = button.dataset.evidenceUnsuppress;
+      const docType = button.dataset.docType || '';
+      if (!conceptKey || !docType) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextSuppressions = removeConceptSuppression({
+        conceptKey,
+        docType,
+        sourceRefKey: button.dataset.sourceRefKey || '',
+      }, {
+        suppressions: reviewMemory.conceptSuppressions,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ conceptSuppressions: nextSuppressions });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+}
+
+function bindTimeBasisControls() {
+  document.querySelectorAll('[data-time-basis-save]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const sourceRefKey = button.dataset.timeBasisSave;
+      const docType = button.dataset.docType || '';
+      const select = document.querySelector(`[data-time-basis-select="${cssEscape(sourceRefKey)}"]`);
+      const basis = select?.value || '';
+      if (!sourceRefKey || !docType || !basis) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextOverrides = saveTimeBasisOverride({
+        docType,
+        sourceRefKey,
+        sourceRefLabel: button.dataset.sourceRefLabel || '',
+        basis,
+      }, {
+        overrides: reviewMemory.timeBasisOverrides,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ timeBasisOverrides: nextOverrides });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-time-basis-clear]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const sourceRefKey = button.dataset.timeBasisClear;
+      const docType = button.dataset.docType || '';
+      if (!sourceRefKey || !docType) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextOverrides = removeTimeBasisOverride({
+        docType,
+        sourceRefKey,
+        basis: 'historical',
+      }, {
+        overrides: reviewMemory.timeBasisOverrides,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ timeBasisOverrides: nextOverrides });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+}
+
+function bindEntityResolutionControls() {
+  document.querySelectorAll('[data-entity-resolution-save]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const clusterId = button.dataset.entityResolutionSave;
+      const kind = button.dataset.entityKind || '';
+      const aliases = safeParseJson(button.dataset.entityAliases, []);
+      const select = document.querySelector(`[data-entity-resolution-select="${cssEscape(clusterId)}"]`);
+      const canonicalName = select?.value || '';
+      if (!clusterId || !kind || !canonicalName || aliases.length < 2) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextResolutions = saveEntityResolution({
+        kind,
+        canonicalName,
+        aliases,
+      }, {
+        resolutions: reviewMemory.entityResolutions,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ entityResolutions: nextResolutions });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-entity-resolution-clear]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const kind = button.dataset.entityKind || '';
+      const aliases = safeParseJson(button.dataset.entityAliases, []);
+      if (!kind || aliases.length < 2) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextResolutions = removeEntityResolution({
+        kind,
+        aliases,
+        canonicalName: aliases[0],
+      }, {
+        resolutions: reviewMemory.entityResolutions,
+        persist: false,
+      });
+      applyReviewMemoryUpdate({ entityResolutions: nextResolutions });
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+}
+
+function bindOverrideControls(activeDoc) {
+  document.querySelectorAll('[data-override-map]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const rowLabel = decodeURIComponent(button.dataset.overrideMap);
+      const rowKey = button.dataset.overrideMap;
+      const select = document.querySelector(`[data-override-select="${cssEscape(rowKey)}"]`);
+      const fieldName = select?.value || '';
+      if (!fieldName) return;
+
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextOverrides = saveReviewOverride({
+        docType: activeDoc.docType,
+        sheetName: activeDoc.sourceSheetName,
+        rowLabel,
+        action: 'map',
+        fieldName,
+      }, {
+        rules: reviewMemory.reviewOverrides,
+        persist: false,
+      });
+      state.reviewMemory = {
+        ...reviewMemory,
+        ...buildReviewMemoryBundle({
+          reviewOverrides: nextOverrides,
+          sourcePreferences: reviewMemory.sourcePreferences,
+          conceptSuppressions: reviewMemory.conceptSuppressions,
+          timeBasisOverrides: reviewMemory.timeBasisOverrides,
+          entityResolutions: reviewMemory.entityResolutions,
+        }),
+        companyName: state.companyName,
+        dealName: buildReviewScope().dealName,
+        reviewerId: buildReviewScope().reviewerId,
+      };
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-override-ignore]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const rowLabel = decodeURIComponent(button.dataset.overrideIgnore);
+      const reviewMemory = getEffectiveReviewMemory();
+      const nextOverrides = saveReviewOverride({
+        docType: activeDoc.docType,
+        sheetName: activeDoc.sourceSheetName,
+        rowLabel,
+        action: 'ignore',
+      }, {
+        rules: reviewMemory.reviewOverrides,
+        persist: false,
+      });
+      state.reviewMemory = {
+        ...reviewMemory,
+        ...buildReviewMemoryBundle({
+          reviewOverrides: nextOverrides,
+          sourcePreferences: reviewMemory.sourcePreferences,
+          conceptSuppressions: reviewMemory.conceptSuppressions,
+          timeBasisOverrides: reviewMemory.timeBasisOverrides,
+          entityResolutions: reviewMemory.entityResolutions,
+        }),
+        companyName: state.companyName,
+        dealName: buildReviewScope().dealName,
+        reviewerId: buildReviewScope().reviewerId,
+      };
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+
+  document.querySelectorAll('[data-override-clear]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const rowLabel = decodeURIComponent(button.dataset.overrideClear);
+      const reviewMemory = getEffectiveReviewMemory();
+      const withoutMap = removeReviewOverride({
+        docType: activeDoc.docType,
+        sheetName: activeDoc.sourceSheetName,
+        rowLabel,
+        action: 'map',
+      }, {
+        rules: reviewMemory.reviewOverrides,
+        persist: false,
+      });
+      const nextOverrides = removeReviewOverride({
+        docType: activeDoc.docType,
+        sheetName: activeDoc.sourceSheetName,
+        rowLabel,
+        action: 'ignore',
+      }, {
+        rules: withoutMap,
+        persist: false,
+      });
+      state.reviewMemory = {
+        ...reviewMemory,
+        ...buildReviewMemoryBundle({
+          reviewOverrides: nextOverrides,
+          sourcePreferences: reviewMemory.sourcePreferences,
+          conceptSuppressions: reviewMemory.conceptSuppressions,
+          timeBasisOverrides: reviewMemory.timeBasisOverrides,
+          entityResolutions: reviewMemory.entityResolutions,
+        }),
+        companyName: state.companyName,
+        dealName: buildReviewScope().dealName,
+        reviewerId: buildReviewScope().reviewerId,
+      };
+      await persistReviewMemoryState();
+      rerunAnalysisFromStoredIngestion();
+    });
+  });
+}
+
+function rerunAnalysisFromStoredIngestion() {
+  if (!state.lastIngestion) return;
+
+  const companyContext = buildCompanyContext();
+  const effectiveIngestion = applyReviewOverridesToIngestionResponse(state.lastIngestion, getEffectiveReviewMemory().reviewOverrides);
+  const pipelineResult = runPipeline(buildPipelineFileDescriptors(effectiveIngestion), companyContext);
+
+  state.lastDiagnostics = {
+    ...(pipelineResult?.diagnostics || {}),
+    backendIngestion: effectiveIngestion,
+  };
+
+  showDashboard(pipelineResult?.dashboardData);
+}
+
+function cssEscape(value) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(value);
+  }
+  return String(value).replace(/"/g, '\\"');
+}
+
+function safeParseJson(rawValue, fallback) {
+  if (!rawValue) return fallback;
+  try {
+    return JSON.parse(rawValue);
+  } catch (_error) {
+    return fallback;
+  }
+}
+
 function renderGrowthDetailBlocks(item) {
   const bits = [];
 
@@ -891,7 +2289,7 @@ function renderGrowthDetailBlocks(item) {
     bits.push(`
       <div class="growth-detail-block">
         <div class="growth-detail-label">Underwriting assumptions</div>
-        <div class="growth-detail-list">${item.underwritingAssumptions.map((entry) => `<span>${entry}</span>`).join('')}</div>
+        <div class="growth-detail-list">${item.underwritingAssumptions.map((entry) => `<span>${escapeHtml(entry)}</span>`).join('')}</div>
       </div>
     `);
   }
@@ -901,7 +2299,7 @@ function renderGrowthDetailBlocks(item) {
       <div class="growth-detail-block">
         <div class="growth-detail-label">Evidence documents</div>
         <div class="growth-detail-list">
-          ${item.evidenceDocuments.map((doc) => `<span class="${doc.provided ? 'provided' : 'missing'}">${doc.label}${doc.provided ? '' : ' (missing)'}</span>`).join('')}
+          ${item.evidenceDocuments.map((doc) => `<span class="${doc.provided ? 'provided' : 'missing'}">${escapeHtml(doc.label)}${doc.provided ? '' : ' (missing)'}</span>`).join('')}
         </div>
       </div>
     `);
@@ -946,16 +2344,16 @@ function renderAcquisitionAdvice(advice) {
       <div class="advice-overview-head">
         <div>
           <div class="advice-overline">Search-fund take</div>
-          <h3>${advice.attractiveness}</h3>
+          <h3>${escapeHtml(advice.attractiveness)}</h3>
         </div>
-        <span class="advice-confidence ${advice.confidence}">${advice.confidence} confidence</span>
+        <span class="advice-confidence ${safeClass(advice.confidence, SAFE_CONFIDENCE_CLASSES, 'low')}">${escapeHtml(advice.confidence)} confidence</span>
       </div>
-      <p class="advice-summary">${advice.summary}</p>
+      <p class="advice-summary">${escapeHtml(advice.summary)}</p>
       <div class="advice-risk-strip">
         ${(advice.keyRisks || []).map((risk) => `
-          <div class="advice-risk-pill ${risk.severity}">
-            <strong>${risk.dimension}</strong>
-            <span>${risk.text}</span>
+          <div class="advice-risk-pill ${safeClass(risk.severity, SAFE_STATUS_CLASSES, 'low')}">
+            <strong>${escapeHtml(risk.dimension)}</strong>
+            <span>${escapeHtml(risk.text)}</span>
           </div>
         `).join('')}
       </div>
@@ -975,11 +2373,11 @@ function renderAdviceItems(items = []) {
     <div class="advice-item">
       <div class="advice-item-top">
         <span class="advice-priority">P${item.priority}</span>
-        <span class="advice-category">${item.category}</span>
-        <span class="advice-confidence ${item.confidence}">${item.confidence} confidence</span>
+        <span class="advice-category">${escapeHtml(item.category)}</span>
+        <span class="advice-confidence ${safeClass(item.confidence, SAFE_CONFIDENCE_CLASSES, 'low')}">${escapeHtml(item.confidence)} confidence</span>
       </div>
-      <h4>${item.title}</h4>
-      <p>${item.body}</p>
+      <h4>${escapeHtml(item.title)}</h4>
+      <p>${escapeHtml(item.body)}</p>
       ${renderAdviceSupport(item.support)}
     </div>
   `).join('');
@@ -992,7 +2390,7 @@ function renderAdviceSupport(support = {}) {
     bits.push(`
       <div class="advice-support-block">
         <div class="advice-support-label">Request next</div>
-        <div class="advice-support-list">${support.requests.map((entry) => `<span>${entry}</span>`).join('')}</div>
+        <div class="advice-support-list">${support.requests.map((entry) => `<span>${escapeHtml(entry)}</span>`).join('')}</div>
       </div>
     `);
   }
@@ -1001,7 +2399,7 @@ function renderAdviceSupport(support = {}) {
     bits.push(`
       <div class="advice-support-block">
         <div class="advice-support-label">Management questions</div>
-        <div class="advice-support-list">${support.managementQuestions.map((entry) => `<span>${entry}</span>`).join('')}</div>
+        <div class="advice-support-list">${support.managementQuestions.map((entry) => `<span>${escapeHtml(entry)}</span>`).join('')}</div>
       </div>
     `);
   }
@@ -1010,7 +2408,7 @@ function renderAdviceSupport(support = {}) {
     bits.push(`
       <div class="advice-support-block">
         <div class="advice-support-label">Valuation / structure</div>
-        <div class="advice-support-note">${support.valuationImpact}</div>
+        <div class="advice-support-note">${escapeHtml(support.valuationImpact)}</div>
       </div>
     `);
   }
@@ -1019,7 +2417,7 @@ function renderAdviceSupport(support = {}) {
     bits.push(`
       <div class="advice-support-block">
         <div class="advice-support-label">Deal structure angle</div>
-        <div class="advice-support-note">${support.structure}</div>
+        <div class="advice-support-note">${escapeHtml(support.structure)}</div>
       </div>
     `);
   }
@@ -1041,6 +2439,7 @@ function renderAnalyticsKpis(data) {
   const latestMargin = data.margins?.ebitda?.at(-1);
   const topCustomer = data.customerBreakdown?.customers?.[0]?.percentage;
   const leverage = data.leverage?.debtToEbitda?.at(-1);
+  const concentrationDetail = data.customerBreakdown?.proxy ? 'Exposure proxy from aging detail' : 'Share of trailing revenue';
 
   const kpis = [
     {
@@ -1059,7 +2458,7 @@ function renderAnalyticsKpis(data) {
       label: 'Top Customer',
       value: topCustomer != null ? `${topCustomer}%` : 'N/A',
       tone: 'amber',
-      detail: 'Share of trailing revenue',
+      detail: concentrationDetail,
     },
     {
       label: 'Debt / EBITDA',
@@ -1071,9 +2470,9 @@ function renderAnalyticsKpis(data) {
 
   kpiGrid.innerHTML = kpis.map((kpi) => `
     <div class="analytics-kpi-card ${kpi.tone}">
-      <div class="analytics-kpi-label">${kpi.label}</div>
-      <div class="analytics-kpi-value">${kpi.value}</div>
-      <div class="analytics-kpi-detail">${kpi.detail}</div>
+      <div class="analytics-kpi-label">${escapeHtml(kpi.label)}</div>
+      <div class="analytics-kpi-value">${escapeHtml(kpi.value)}</div>
+      <div class="analytics-kpi-detail">${escapeHtml(kpi.detail)}</div>
     </div>
   `).join('');
 }
@@ -1082,20 +2481,23 @@ function renderSignalMap(data) {
   const signalMap = $('#signal-map');
   if (!signalMap) return;
 
-  signalMap.innerHTML = (data.subScores || []).map((score) => `
+  signalMap.innerHTML = (data.subScores || []).map((score) => {
+    const scoreValue = clampNumber(score.score, 0, 100);
+    return `
     <div class="signal-row">
       <div class="signal-row-main">
         <div class="signal-row-label">
-          <strong>${score.label}</strong>
-          <span>${score.note}</span>
+          <strong>${escapeHtml(score.label)}</strong>
+          <span>${escapeHtml(score.note)}</span>
         </div>
-        <div class="signal-row-score" style="color:${scoreColor(score.score)}">${score.score}</div>
+        <div class="signal-row-score" style="color:${scoreColor(scoreValue)}">${scoreValue}</div>
       </div>
       <div class="signal-track">
-        <div class="signal-fill" style="width:${score.score}%; background:${scoreColor(score.score)}"></div>
+        <div class="signal-fill" style="width:${scoreValue}%; background:${scoreColor(scoreValue)}"></div>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function renderConcentrationMonitor(data) {
@@ -1108,17 +2510,24 @@ function renderConcentrationMonitor(data) {
     return;
   }
 
-  monitor.innerHTML = customers.map((customer, index) => `
+  const sourceLabel = data.customerBreakdown?.sourceLabel
+    ? `<div class="concentration-source">${escapeHtml(data.customerBreakdown.sourceLabel)}</div>`
+    : '';
+
+  monitor.innerHTML = `${sourceLabel}${customers.map((customer, index) => {
+    const percentage = clampNumber(customer.percentage, 0, 100);
+    return `
     <div class="concentration-row">
       <div class="concentration-meta">
-        <span class="concentration-name">${customer.name}</span>
-        <span class="concentration-value">${customer.percentage}%</span>
+        <span class="concentration-name">${escapeHtml(customer.name)}</span>
+        <span class="concentration-value">${percentage}%</span>
       </div>
       <div class="concentration-bar">
-        <div class="concentration-fill concentration-fill-${Math.min(index + 1, 6)}" style="width:${customer.percentage}%"></div>
+        <div class="concentration-fill concentration-fill-${Math.min(index + 1, 6)}" style="width:${percentage}%"></div>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('')}`;
 }
 
 function renderDebtLadder(data) {
@@ -1131,7 +2540,7 @@ function renderDebtLadder(data) {
     return;
   }
 
-  const totalPrincipal = instruments.reduce((sum, instrument) => sum + instrument.principal, 0);
+  const totalPrincipal = instruments.reduce((sum, instrument) => sum + toFiniteNumber(instrument.principal, 0), 0);
   const maturities = instruments.map((instrument) => new Date(instrument.maturity).getTime()).filter(Boolean);
   const minMaturity = Math.min(...maturities);
   const maxMaturity = Math.max(...maturities);
@@ -1139,24 +2548,33 @@ function renderDebtLadder(data) {
 
   ladder.innerHTML = instruments.map((instrument) => {
     const maturityTime = new Date(instrument.maturity).getTime();
-    const position = ((maturityTime - minMaturity) / maturitySpan) * 100;
+    const hasValidMaturity = Boolean(instrument.maturity) && !Number.isNaN(maturityTime);
+    const position = hasValidMaturity && Number.isFinite(minMaturity)
+      ? clampNumber(((maturityTime - minMaturity) / maturitySpan) * 100, 0, 100)
+      : 0;
+    const rate = Number.isFinite(Number(instrument.rate)) ? Number(instrument.rate) : null;
+    const principal = toFiniteNumber(instrument.principal, 0);
+    const rateLabel = rate != null ? `${rate.toFixed(2)}% rate` : 'Rate N/A';
+    const principalShare = totalPrincipal > 0 && principal > 0
+      ? `${((principal / totalPrincipal) * 100).toFixed(0)}% of debt stack`
+      : 'Share N/A';
 
     return `
       <div class="debt-item">
         <div class="debt-item-top">
           <div>
-            <div class="debt-name">${instrument.name}</div>
-            <div class="debt-meta">${formatDate(instrument.maturity)} maturity</div>
+            <div class="debt-name">${escapeHtml(instrument.name)}</div>
+            <div class="debt-meta">${escapeHtml(formatDate(instrument.maturity))} maturity</div>
           </div>
-          <div class="debt-amount">${formatMillions(instrument.principal)}</div>
+          <div class="debt-amount">${formatMillions(principal)}</div>
         </div>
         <div class="debt-timeline">
           <div class="debt-timeline-line"></div>
           <div class="debt-timeline-point" style="left:${position}%"></div>
         </div>
         <div class="debt-item-bottom">
-          <span>${instrument.rate.toFixed(2)}% rate</span>
-          <span>${((instrument.principal / totalPrincipal) * 100).toFixed(0)}% of debt stack</span>
+          <span>${escapeHtml(rateLabel)}</span>
+          <span>${escapeHtml(principalShare)}</span>
         </div>
       </div>
     `;
@@ -1164,11 +2582,14 @@ function renderDebtLadder(data) {
 }
 
 function formatMillions(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'N/A';
   return `$${value.toFixed(1)}M`;
 }
 
 function formatDate(value) {
-  return new Date(value).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Maturity N/A';
+  return parsed.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 }
 
 function scoreColor(score) {
@@ -1181,16 +2602,17 @@ function scoreColor(score) {
 function animateScore(target) {
   const el = $('#overall-score');
   const ring = $('.score-ring-fill');
+  const safeTarget = clampNumber(target, 0, 100);
   const circumference = 326.73;
-  const offset = circumference - (target / 100) * circumference;
+  const offset = circumference - (safeTarget / 100) * circumference;
 
-  ring.style.stroke = scoreColor(target);
+  ring.style.stroke = scoreColor(safeTarget);
   ring.style.strokeDashoffset = offset;
 
   let current = 0;
   const step = () => {
     current += 1;
-    if (current > target) { el.textContent = target; return; }
+    if (current > safeTarget) { el.textContent = safeTarget; return; }
     el.textContent = current;
     requestAnimationFrame(step);
   };
@@ -1203,6 +2625,9 @@ function animateScore(target) {
 // ===== NEW ANALYSIS =====
 $('#new-analysis-btn').addEventListener('click', () => {
   state.files = [];
+  state.activeReviewDocType = null;
+  state.lastIngestion = null;
+  state.lastDiagnostics = null;
   renderFileList();
   updateAnalyzeBtn();
   // Reset processing steps

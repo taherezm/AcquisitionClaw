@@ -1,8 +1,9 @@
 import { CLASSIFICATION_KEYWORDS, DOC_TYPES } from '../../../ingestion/schemas.js';
 
-const FILE_NAME_WEIGHT = 0.25;
-const SHEET_NAME_WEIGHT = 0.35;
-const HEADER_WEIGHT = 0.4;
+const FILE_NAME_WEIGHT = 0.2;
+const SHEET_NAME_WEIGHT = 0.25;
+const TITLE_WEIGHT = 0.25;
+const HEADER_WEIGHT = 0.3;
 
 const CONFIDENCE_THRESHOLD_LOW = 0.3;
 const CONFIDENCE_THRESHOLD_REVIEW = 0.55;
@@ -28,8 +29,11 @@ const HEADER_KEYWORDS = Object.freeze({
   ],
   [DOC_TYPES.CASH_FLOW_STATEMENT]: [
     'operating cash flow',
+    'operating activities',
     'investing cash flow',
+    'investing activities',
     'financing cash flow',
+    'financing activities',
     'free cash flow',
     'capex',
     'net change in cash',
@@ -109,6 +113,7 @@ export function getClassificationThresholds() {
     STRONG_SHEET_THRESHOLD,
     FILE_NAME_WEIGHT,
     SHEET_NAME_WEIGHT,
+    TITLE_WEIGHT,
     HEADER_WEIGHT,
   };
 }
