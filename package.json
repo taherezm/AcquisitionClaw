@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node backend/server.js",
     "dev": "node --watch backend/server.js",
+    "build:netlify": "node scripts/buildNetlifySite.js",
     "benchmark": "node scripts/runBenchmarks.js",
     "test:e2e": "playwright test"
   },
@@ -13,6 +14,7 @@
     "express": "^4.21.2",
     "multer": "^2.0.2",
     "pdfjs-dist": "^5.6.205",
+    "serverless-http": "^4.0.0",
     "tesseract.js": "^7.0.0",
     "xlsx": "^0.18.5"
   },

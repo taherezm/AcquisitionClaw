@@ -1,13 +1,13 @@
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-
 import { buildParsedDocument, buildParsingResponse } from './parsingUtils.js';
 
 const Y_TOLERANCE = 3;
 const GAP_AS_NEW_CELL = 24;
 const OCR_RENDER_SCALE = 2;
+let pdfjsLibPromise = null;
 let ocrDependenciesPromise = null;
 
 export async function parsePdfFile(file) {
+  const pdfjsLib = await getPdfJsLib();
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(file.buffer),
     useSystemFonts: true,
@@ -297,6 +297,18 @@ async function getOcrDependencies() {
   }
 
   return ocrDependenciesPromise;
+}
+
+async function getPdfJsLib() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = import('pdfjs-dist/legacy/build/pdf.mjs')
+      .catch((error) => {
+        pdfjsLibPromise = null;
+        throw new Error(`PDF parsing dependency failed to load: ${error.message}`);
+      });
+  }
+
+  return pdfjsLibPromise;
 }
 
 async function createOcrWorker() {

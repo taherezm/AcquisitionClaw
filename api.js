@@ -1,3 +1,5 @@
+const DEFAULT_BACKEND_ORIGIN = 'http://localhost:8080';
+
 export async function ingestFiles(files, companyContext = {}) {
   const formData = new FormData();
   const reviewMemory = companyContext.reviewMemory || null;
@@ -21,18 +23,18 @@ export async function ingestFiles(files, companyContext = {}) {
 
   let response;
   try {
-    response = await fetch('/api/ingest', {
+    response = await fetch(buildApiUrl('/api/ingest'), {
       method: 'POST',
       body: formData,
     });
   } catch (_error) {
-    throw new Error('Unable to reach the ingestion service. Start the backend and try again.');
+    throw new Error(`Unable to reach the ingestion service at ${getApiOriginLabel()}. Start the backend and try again.`);
   }
 
-  const payload = await response.json().catch(() => null);
+  const { payload, text } = await readApiResponse(response);
 
   if (!response.ok) {
-    throw new Error(payload?.error || 'Backend ingestion failed.');
+    throw new Error(buildApiErrorMessage(response, payload, text, 'Backend ingestion failed.'));
   }
 
   return payload;
@@ -46,14 +48,14 @@ export async function fetchReviewMemory(scopeInput) {
 
   let response;
   try {
-    response = await fetch(`/api/review-memory?companyName=${encodeURIComponent(scope.companyName)}&dealName=${encodeURIComponent(scope.dealName)}&reviewerId=${encodeURIComponent(scope.reviewerId)}`);
+    response = await fetch(buildApiUrl(`/api/review-memory?companyName=${encodeURIComponent(scope.companyName)}&dealName=${encodeURIComponent(scope.dealName)}&reviewerId=${encodeURIComponent(scope.reviewerId)}`));
   } catch (_error) {
-    throw new Error('Unable to load persisted review memory from the backend.');
+    throw new Error(`Unable to load persisted review memory from ${getApiOriginLabel()}.`);
   }
 
-  const payload = await response.json().catch(() => null);
+  const { payload, text } = await readApiResponse(response);
   if (!response.ok) {
-    throw new Error(payload?.error || 'Failed to load persisted review memory.');
+    throw new Error(buildApiErrorMessage(response, payload, text, 'Failed to load persisted review memory.'));
   }
   return normalizeReviewMemoryPayload(payload, scope);
 }
@@ -66,7 +68,7 @@ export async function saveReviewMemory(scopeInput, reviewMemory) {
 
   let response;
   try {
-    response = await fetch('/api/review-memory', {
+    response = await fetch(buildApiUrl('/api/review-memory'), {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -84,12 +86,12 @@ export async function saveReviewMemory(scopeInput, reviewMemory) {
       }),
     });
   } catch (_error) {
-    throw new Error('Unable to persist review memory to the backend.');
+    throw new Error(`Unable to persist review memory to ${getApiOriginLabel()}.`);
   }
 
-  const payload = await response.json().catch(() => null);
+  const { payload, text } = await readApiResponse(response);
   if (!response.ok) {
-    throw new Error(payload?.error || 'Failed to persist review memory.');
+    throw new Error(buildApiErrorMessage(response, payload, text, 'Failed to persist review memory.'));
   }
   return normalizeReviewMemoryPayload(payload, scope);
 }
@@ -195,4 +197,92 @@ function normalizeReviewScopeInput(scopeInput = {}) {
     dealName: String(scopeInput?.dealName || '').trim() || 'primary-deal',
     reviewerId: String(scopeInput?.reviewerId || '').trim() || 'anonymous-reviewer',
   };
+}
+
+function buildApiUrl(pathname) {
+  const origin = resolveApiOrigin();
+  if (!origin) return pathname;
+  return `${origin}${pathname}`;
+}
+
+function getApiOriginLabel() {
+  return resolveApiOrigin() || 'this page';
+}
+
+function resolveApiOrigin() {
+  if (typeof window === 'undefined' || !window.location) {
+    return '';
+  }
+
+  const configuredOrigin = safeReadLocalStorage('acquisitionclaw.apiOrigin');
+  if (configuredOrigin) {
+    return configuredOrigin.replace(/\/+$/, '');
+  }
+
+  const { protocol, hostname, port } = window.location;
+
+  if (protocol === 'file:') {
+    return DEFAULT_BACKEND_ORIGIN;
+  }
+
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    if (port === '8080' || port === '8888') {
+      return '';
+    }
+
+    return DEFAULT_BACKEND_ORIGIN;
+  }
+
+  return '';
+}
+
+async function readApiResponse(response) {
+  const text = await response.text().catch(() => '');
+  if (!text) {
+    return { payload: null, text: '' };
+  }
+
+  try {
+    return {
+      payload: JSON.parse(text),
+      text,
+    };
+  } catch (_error) {
+    return {
+      payload: null,
+      text,
+    };
+  }
+}
+
+function buildApiErrorMessage(response, payload, text, fallbackMessage) {
+  if (payload?.error) {
+    return payload.error;
+  }
+
+  if (response.status === 404) {
+    return `The backend API was not found at ${getApiOriginLabel()}. Open the app from http://localhost:8080 or point the frontend at the running backend.`;
+  }
+
+  if (response.status >= 500) {
+    return `The backend returned ${response.status}. Check the server terminal for the underlying error.`;
+  }
+
+  if (text && !looksLikeHtml(text)) {
+    return text.slice(0, 240);
+  }
+
+  return `${fallbackMessage} HTTP ${response.status}.`;
+}
+
+function looksLikeHtml(text) {
+  return /<!doctype html>|<html[\s>]/i.test(text || '');
+}
+
+function safeReadLocalStorage(key) {
+  try {
+    return String(window.localStorage?.getItem(key) || '').trim();
+  } catch (_error) {
+    return '';
+  }
 }

@@ -1,13 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { buildReviewMemoryBundle } from '../../../ingestion/reviewOverrides.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '../../..');
-const REVIEW_MEMORY_DIR = path.join(projectRoot, '.data', 'review-memory');
+const projectRoot = path.resolve(process.cwd());
 const STATE_FILENAME = 'state.json';
 const HISTORY_FILENAME = 'history.json';
 const HISTORY_LIMIT = 40;
@@ -183,7 +179,7 @@ function buildScopeKey(value = '') {
 }
 
 function getReviewMemoryScopeDir(scope) {
-  return path.join(REVIEW_MEMORY_DIR, scope.companyKey, scope.dealKey);
+  return path.join(getReviewMemoryBaseDir(), scope.companyKey, scope.dealKey);
 }
 
 async function ensureScopeDir(scopeDir) {
@@ -265,4 +261,22 @@ function summarizeCollectionDelta(label, previousItems = [], nextItems = [], bui
     addedCount: added.length,
     removedCount: removed.length,
   };
+}
+
+function getReviewMemoryBaseDir() {
+  return path.join(resolveWritableDataRoot(), 'review-memory');
+}
+
+function resolveWritableDataRoot() {
+  const cwd = path.resolve(process.cwd());
+  const runningInServerlessBundle = cwd.startsWith('/var/task')
+    || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME)
+    || Boolean(process.env.LAMBDA_TASK_ROOT)
+    || Boolean(process.env.NETLIFY);
+
+  if (runningInServerlessBundle) {
+    return path.join(process.env.TMPDIR || '/tmp', 'acquisitionclaw-data');
+  }
+
+  return path.join(projectRoot, '.data');
 }
