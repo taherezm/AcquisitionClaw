@@ -1,57 +1,56 @@
 # AcquisitionClaw
 
-AcquisitionClaw is a buy-side financial analysis app for search fund and small-cap acquisition workflows. It combines a browser-based dashboard with a local Node/Express ingestion service that accepts uploaded financial files, parses them deterministically, maps them into a normalized model, validates the resulting financials, and drives scoring, charts, growth opportunities, and acquisition recommendations.
+AcquisitionClaw is a buy-side acquisition analysis app for search-fund and small-cap deal workflows. It ingests messy seller files, normalizes them into a structured financial model, ranks conflicting evidence across documents, and turns that into diligence-oriented scoring, charts, recommendations, and review workflows.
 
-## Current Status
+## Current Product Shape
 
-This repo is no longer a static demo only.
+This is no longer a static demo.
 
-The current build supports:
+The current build includes:
 
-- browser uploads wired to a real backend at `/api/ingest`
-- multipart upload handling with in-memory file processing
-- deterministic parsing for `.csv`, `.xlsx`, and text-readable `.pdf`
-- page-level PDF provenance with OCR fallback for image-only pages
-- intra-sheet section splitting for mixed workbooks / combined exports
-- sheet-aware document classification
+- browser uploads wired to a real backend API
+- deterministic ingestion for `.csv`, `.xlsx`, and text-readable `.pdf`
+- OCR fallback for image-based PDF pages
+- mixed-sheet and mixed-section splitting for ugly workbook exports
+- document classification for common search-fund file types
 - schema mapping into normalized financial objects
-- learned alias reuse from manual review mappings
-- reviewer-memory ranking signals from persisted map / ignore decisions
-- local filesystem persistence for company/deal-scoped reviewer memory with revisions and audit history
-- explicit reviewer actions for preferred sources, source suppressions, time-basis overrides, and entity confirmation
-- cross-document reconciliation and period / unit conflict detection
-- assumption ledger and confidence-lift recommendations in the dashboard
-- benchmark fixtures and a local regression runner for clean, ugly, and preferred-source search-fund packs
-- calibration metrics for labeled evidence selections, false-high-confidence cases, and reviewer lift
-- browser regression coverage for upload, evidence ranking, and persisted reviewer-memory flows
-- GitHub Actions CI for syntax, benchmarks, and browser regression
-- pre-scoring validation and confidence adjustment
-- dashboard outputs driven by real normalized data when available
-- demo/synthetic fallback preserved only when explicitly enabled in code
+- cross-document evidence ranking and conflict resolution
+- field-level confidence decomposition
+- temporal alignment detection for FY, LTM, point-in-time, and similar date-basis conflicts
+- entity resolution for repeated lenders, customers, and other renamed concepts across files
+- reviewer-memory actions for source preferences, suppressions, time-basis overrides, and entity confirmation
+- assumption ledger output and ambiguity-specific review workflows
+- benchmark fixtures for clean packs, ugly packs, and preferred-source overrides
+- browser regression coverage and CI
 
-The current v1 intentionally does not support:
+## Deployment
 
-- production-grade OCR accuracy on very poor scans or handwritten/image-heavy PDFs
-- production-grade shared database storage or authenticated user accounts
-- user accounts or multi-user workflows
-- deal history, versioning, or audit storage
+The deployed app is designed to run on Netlify:
 
-## What The App Does Today
+- the frontend is published as static assets from `.netlify/public`
+- the backend Express app runs behind Netlify Functions
+- `/api/*` routes are rewritten to the Netlify function entrypoint
+
+Relevant deployment files:
+
+- [netlify.toml](/Users/tatoenahaisi/Downloads/AcquisitionClaw/netlify.toml)
+- [netlify/functions/api.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/netlify/functions/api.js)
+- [scripts/buildNetlifySite.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/scripts/buildNetlifySite.js)
+
+## What The App Does
 
 Uploaded files move through this pipeline:
 
-1. upload to `/api/ingest`
-2. file-type validation
-3. deterministic parsing
-4. heuristic document classification
-5. schema mapping / extraction
-6. normalization into the app’s internal financial model
-7. validation of mapped financials
-8. scoring, charting, growth opportunity generation, and acquisition recommendation output
+1. file validation
+2. parsing
+3. document classification
+4. schema mapping and extraction
+5. normalization into the internal financial model
+6. validation and reconciliation
+7. evidence ranking and ambiguity handling
+8. scoring, charting, diligence notes, and recommendation output
 
-If uploaded data maps cleanly, the dashboard uses the uploaded values directly.
-
-If uploaded data is incomplete or weakly mapped, the app now lowers confidence and surfaces missing-data and validation notes instead of silently inventing production values.
+The app prefers real uploaded data. It no longer silently fills gaps with demo values during the normal upload flow.
 
 ## Supported Inputs
 
@@ -61,7 +60,7 @@ If uploaded data is incomplete or weakly mapped, the app now lowers confidence a
 - `.xlsx`
 - `.pdf`
 
-### Supported document types
+### Common document types
 
 - income statement / P&L
 - balance sheet
@@ -73,64 +72,58 @@ If uploaded data is incomplete or weakly mapped, the app now lowers confidence a
 - accounts payable aging
 - debt schedule
 - revenue breakdown / customer concentration
-- unknown
+- unknown / mixed exports
 
-## Local Run
+## Interpretability Features
 
-From the project root:
+The current build is centered on ambiguity handling rather than just parsing.
 
-```bash
-npm install
-npm start
-```
+### Evidence ranking
 
-Open:
+When multiple documents disagree, the app can rank candidates using:
 
-```text
-http://localhost:8080
-```
+- document family priors
+- source quality and match confidence
+- OCR vs native extraction quality
+- temporal alignment
+- reconciliation support
+- reviewer memory
 
-For development with file watching:
+### Confidence decomposition
 
-```bash
-npm run dev
-```
+Confidence is not just one score. The app decomposes it across factors such as:
 
-To run the interpretability benchmark fixtures:
+- label match strength
+- source quality
+- period alignment
+- unit certainty
+- reconciliation support
+- reviewer support
+- derived vs direct values
 
-```bash
-npm run benchmark
-```
+### Reviewer actions
 
-To run the browser regression suite:
+The dashboard supports explicit ambiguity resolution:
 
-```bash
-npm run test:e2e
-```
+- prefer one document family for a field
+- suppress a noisy source for a concept
+- override time basis
+- confirm entity aliases
 
-## Frontend Behavior
+Reviewer memory is scoped by company, deal, and reviewer.
 
-The browser flow is:
+### Provenance and ambiguity surfaces
 
-- upload files in the UI
-- scope reviewer memory by company, deal, and reviewer id
-- send them with `FormData` to `/api/ingest`
-- receive structured JSON per file
-- store the ingestion result client-side
-- pass normalized backend-driven data into the scoring pipeline
-- render score, charts, underwriting notes, growth opportunities, and acquisition advice
+The dashboard exposes:
 
-The dashboard now also shows:
+- evidence cards per key metric
+- ambiguity workflows
+- temporal conflicts
+- entity clusters
+- reviewer-memory history
+- assumption ledger entries
 
-- extraction confidence
-- validation status and warnings
-- hard validation errors when present
-- missing-data notes
-- ranked evidence conflicts with reviewer actions
-- temporal override controls and entity-confirmation controls
-- reviewer-memory history and revision state
-
-## Backend API
+## API
 
 ### `POST /api/ingest`
 
@@ -152,15 +145,21 @@ Optional reviewer-memory fields:
 - `reviewTimeBasisOverrides`
 - `reviewEntityResolutions`
 
-### `GET /api/review-memory?companyName=...&dealName=...&reviewerId=...`
+### `GET /api/review-memory`
 
-Loads persisted reviewer memory for a company/deal scope. The backend stores this locally under `.data/review-memory/<company>/<deal>/`.
+Query params:
+
+- `companyName`
+- `dealName`
+- `reviewerId`
+
+Loads persisted reviewer memory for the current scope.
 
 ### `PUT /api/review-memory`
 
-Persists reviewer memory for a company/deal scope using optimistic revision checks.
+Persists reviewer memory for the current scope with optimistic revision checks.
 
-Request body:
+Request fields:
 
 - `companyName`
 - `dealName`
@@ -172,154 +171,37 @@ Request body:
 - `timeBasisOverrides`
 - `entityResolutions`
 
-### Example
+## Validation And Reconciliation
 
-```bash
-curl -X POST \
-  -F "files=@/path/to/income_statement.csv" \
-  -F "files=@/path/to/debt_schedule.xlsx" \
-  -F "companyName=Acme Manufacturing" \
-  -F "industry=Manufacturing" \
-  -F "ebitdaRange=1m-3m" \
-  http://localhost:8080/api/ingest
-```
-
-### Response shape
-
-The response includes:
-
-- request metadata
-- upload summary
-- one structured result per file
-
-Each file result currently includes:
-
-- `file`
-- `validation`
-- `parsing`
-- `classification`
-- `extraction`
-- `normalization`
-
-## Parsing, Classification, Mapping, Validation
-
-### Parsing
-
-The backend parser is deterministic and modular.
-
-- CSV files are converted into structured rows.
-- Excel files are read workbook-by-workbook and sheet-by-sheet.
-- PDF files are read page-by-page into structured pseudo-sheets with page provenance.
-- PDF text extraction now attempts multi-column reading order reconstruction, footnote capture, and table-block recovery before falling back to OCR.
-- Excel and PDF outputs can be split into section-level candidate documents when one source contains multiple statements.
-- Excel outputs include sheet names, rows, columns, and structured records per sheet.
-
-### Classification
-
-Classification is deterministic for v1 and uses heuristics from:
-
-- filename
-- sheet name
-- header keywords
-
-Each sheet can map to a different document type, with:
-
-- document type
-- confidence score
-- manual-review warnings for weak classifications
-
-### Schema mapping
-
-Mapped outputs normalize common financial label variations, including:
-
-- `Revenue / Net Sales / Total Sales`
-- `COGS / Cost of Revenue`
-- `EBITDA / Operating Profit + D&A`
-- `A/R / Accounts Receivable`
-- `A/P / Accounts Payable`
-- `SG&A / Selling, General & Administrative`
-
-Interpretability now also includes:
-
-- ambiguous row detection
-- low-confidence heuristic match surfacing
-- learned alias reuse from manual review
-- explicit preferred-source and suppression controls in the evidence resolver
-- reviewer time-basis overrides for ambiguous FY/LTM/snapshot interpretation
-- reviewer-confirmed entity alias clustering
-- page / sheet / section source metadata
-- cross-document reconciliation findings
-
-Supported normalized outputs include:
-
-- income statement
-- balance sheet
-- cash flow
-- AR aging
-- AP aging
-- debt schedule
-- revenue concentration
-- projections
-- tax return
-- QoE summary
-
-### Validation
-
-Validation runs before scoring and is designed to degrade confidence rather than fail unnecessarily when data is incomplete.
+Validation runs before scoring and lowers confidence when data is incomplete or inconsistent.
 
 Current checks include:
 
-- balance sheet equation consistency
+- balance-sheet consistency
 - subtotal reasonableness
-- AR aging total vs AR balance comparison
-- AP aging total vs AP balance comparison
-- debt schedule total vs balance sheet debt comparison
-- EBITDA reasonableness relative to revenue and gross profit
-- period granularity conflicts inside a document
-- cross-document scale mismatch detection
-- revenue vs tax-return gross receipts reconciliation
-- income statement EBITDA vs QoE adjusted EBITDA reconciliation
+- AR aging vs balance-sheet AR
+- AP aging vs balance-sheet AP
+- debt-schedule totals vs stated debt
+- revenue vs tax-return gross receipts
+- EBITDA vs QoE adjusted EBITDA
+- unit and scale mismatches
+- period and granularity conflicts
 
-Validation returns:
+## Testing And Verification
 
-- `status`
-- `warnings`
-- `hardErrors`
-- `missingDataNotes`
-- `confidenceAdjustment`
+Useful project commands:
 
-## Scoring And Dashboard Outputs
-
-The scoring engine uses normalized financial data to generate:
-
-- overall health score
-- dimension-level sub-scores
-- strengths
-- risks
-- missing diligence items
-- chart data
-- investment summary
-- acquisition advice
-- growth opportunities
-- next steps
-
-Real uploaded data is now the primary source for these outputs. Synthetic fallback is no longer used in the normal upload flow.
-
-## Demo / Fallback Mode
-
-Synthetic fallback still exists for demo/testing, but it is opt-in.
-
-The upload flow in `app.js` currently sets:
-
-```js
-allowDemoFallback: false
+```bash
+npm run build:netlify
+npm run benchmark
+npm run test:e2e
 ```
 
-That means:
+The benchmark runner covers:
 
-- production-style browser use does not silently backfill missing documents with synthetic numbers
-- weak or incomplete uploads are surfaced as lower-confidence results
-- demo fallback remains available to developers if they explicitly enable it in code
+- clean demo packs
+- ugly search-fund style packs
+- reviewer-memory source-preference fixtures
 
 ## Project Structure
 
@@ -327,199 +209,54 @@ That means:
 backend/
   app.js
   server.js
-  routes/
-    ingestRoutes.js
-  middleware/
-    uploadMiddleware.js
   controllers/
-    ingestController.js
+  middleware/
+  routes/
   services/
-    parsing/
     classification/
-    mapping/
     extraction/
+    mapping/
     normalization/
+    parsing/
+    review/
     validation/
-  utils/
+    workbook/
 
 ingestion/
   classifier.js
+  evidenceResolver.js
   extractor.js
   normalizer.js
   pipeline.js
+  reconciliation.js
+  reviewOverrides.js
   schemas.js
   validator.js
 
-api.js
-app.js
-charts.js
-index.html
-styles.css
+netlify/
+  functions/
+
+scripts/
+tests/
+mock-data/
 ```
 
 ## Key Files
 
-- `backend/app.js`: Express app and static file serving
-- `backend/routes/ingestRoutes.js`: `/api/ingest` route
-- `backend/controllers/ingestController.js`: backend ingestion orchestration
-- `backend/services/parsing/*`: deterministic CSV/XLSX parsing
-- `backend/services/classification/*`: heuristic document classification
-- `backend/services/mapping/*`: schema mapping into normalized financial data
-- `backend/services/extraction/extractionService.js`: backend extraction output
-- `backend/services/normalization/normalizationService.js`: pipeline-ready normalized output
-- `ingestion/pipeline.js`: frontend orchestration into dashboard-ready outputs
-- `ingestion/normalizer.js`: financial model assembly and validation/scoring handoff
-- `ingestion/validator.js`: pre-scoring financial validation
-- `scoring/engine.js`: scoring and confidence handling
-- `app.js`: UI flow and dashboard rendering
+- [app.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/app.js): upload flow, dashboard rendering, reviewer actions
+- [api.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/api.js): browser API client and runtime API-origin handling
+- [backend/app.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/backend/app.js): Express app and API mounting
+- [backend/controllers/ingestController.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/backend/controllers/ingestController.js): ingestion orchestration
+- [backend/services/parsing/pdfParser.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/backend/services/parsing/pdfParser.js): PDF parsing, layout recovery, OCR fallback
+- [backend/services/review/reviewMemoryService.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/backend/services/review/reviewMemoryService.js): scoped reviewer-memory persistence
+- [ingestion/evidenceResolver.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/ingestion/evidenceResolver.js): conflict resolution, temporal reasoning, entity resolution, confidence breakdown
+- [ingestion/reviewOverrides.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/ingestion/reviewOverrides.js): reviewer-memory normalization and ranking signals
+- [scripts/runBenchmarks.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/scripts/runBenchmarks.js): regression and calibration runner
 
-## Limitations In The Current Build
+## Current Limitations
 
-- no PDF parsing yet
-- no OCR
-- no persistence of uploads or analysis sessions
-- no user-editable mapping overrides in the UI
-- no explicit source-to-metric audit trail in the dashboard yet
-- no scenario modeling or sensitivity analysis yet
-- no lender-style covenant or debt-capacity package yet
-- current scoring confidence is still heuristic and can be expanded
-
-## v1.5 (Currently Building): Interpretability For Search Fund Acquisitions
-
-The next version should focus less on adding raw features and more on making the outputs legible, defensible, and investment-committee ready.
-
-### 1. Metric provenance and traceability
-
-Add a source trail for every scored metric:
-
-- metric -> normalized field -> document -> sheet -> row/column reference
-- clickable “why this number” panels in the dashboard
-- highlight whether a metric was direct, derived, or partially inferred
-
-Why this matters:
-
-- search fund buyers need to trust the number before trusting the recommendation
-- it reduces black-box behavior during seller-file review and lender discussions
-
-### 2. Score explainability by dimension
-
-Expose exactly how each dimension score was computed:
-
-- raw inputs used
-- benchmark comparisons
-- penalties applied
-- confidence dampening applied
-- validation findings affecting the dimension
-
-Why this matters:
-
-- buyers can distinguish a true business issue from a document-quality issue
-- it makes the score defendable in IC memos and diligence meetings
-
-### 3. Confidence decomposition
-
-Break confidence into separate components:
-
-- document coverage confidence
-- extraction/mapping confidence
-- validation confidence
-- scoring confidence
-
-Why this matters:
-
-- “low confidence” is too blunt
-- the buyer needs to know whether the problem is missing files, weak mapping, or economically inconsistent data
-
-### 4. Buy-side deal thesis panels
-
-Add structured narrative modules for:
-
-- reasons to believe
-- reasons to worry
-- issues requiring confirmatory diligence
-- likely LOI structure implications
-- key seller follow-up questions
-
-Why this matters:
-
-- search-fund acquisitions are decision workflows, not only analytics workflows
-- the app should help convert numbers into an actionable deal thesis
-
-### 5. Working capital and QoE interpretability
-
-Expand support for:
-
-- normalized working capital bridge
-- add-back classification by quality level
-- seller-adjusted EBITDA vs buyer-adjusted EBITDA
-- recurring vs non-recurring normalization labeling
-
-Why this matters:
-
-- this is where many small-company deals break
-- buyers need to see what is operationally real versus negotiated adjustment logic
-
-### 6. Debt and downside interpretability
-
-Add lender-style and downside views:
-
-- debt service sensitivity
-- fixed charge / interest coverage stress
-- downside EBITDA case
-- covenant-style headroom indicators
-- “what breaks first” summary
-
-Why this matters:
-
-- search-fund deals are financing constrained
-- the recommendation should show fragility, not just base-case quality
-
-### 7. Manual override and review workflow
-
-Add a review layer so a buyer can:
-
-- reclassify a sheet
-- remap a label
-- approve or reject derived metrics
-- lock a preferred number for scoring
-
-Why this matters:
-
-- middle-market seller files are messy
-- interpretability improves when the user can correct mappings without editing code
-
-### 8. Board/IC-ready export layer
-
-Generate an exportable package with:
-
-- investment memo summary
-- diligence flags
-- score rationale
-- confidence explanation
-- source-document appendix
-
-Why this matters:
-
-- the end product for a search fund is usually a memo, lender pack, or diligence summary
-- the app should close that last mile
-
-## Recommended v1.5 Build Order
-
-1. metric provenance and score explainability
-2. confidence decomposition
-3. manual override workflow
-4. working capital / QoE interpretability
-5. downside and debt-capacity views
-6. IC memo export
-
-## Suggested Near-Term Engineering Additions
-
-- a source-reference object on every normalized field
-- a score explanation payload per dimension
-- a UI drawer for “why this score” and “where this number came from”
-- override storage for document type and field mapping corrections
-- a reusable diligence note model for carry-through from ingestion to recommendation output
-
-## Summary
-
-AcquisitionClaw is currently a local, backend-enabled v1 for deterministic ingestion and buy-side financial analysis. It already produces real dashboard outputs from uploaded `.csv` and `.xlsx` files when they map cleanly. The most important next step is not broader file support alone; it is interpretability, provenance, and decision support so a search-fund buyer can understand, defend, and act on the outputs.
+- OCR on poor scans is still weaker than native digital PDFs
+- reviewer-memory persistence is durable in local Node mode, but Netlify preview storage is still serverless-temp and should be moved to a real shared store for production
+- there are no authenticated multi-user accounts yet
+- the app does not yet produce a formal IC memo or lender export package
+- confidence is substantially better than earlier builds, but still heuristic rather than statistically calibrated against a large gold dataset
