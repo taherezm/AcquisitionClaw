@@ -31,11 +31,22 @@ The deployed app is designed to run on Netlify:
 - the backend Express app runs behind Netlify Functions
 - `/api/*` routes are rewritten to the Netlify function entrypoint
 
+GitHub Pages is also configured for static frontend hosting through
+`.github/workflows/pages.yml`. On each push to `main`, GitHub Actions runs
+`npm run build:netlify` and publishes `.netlify/public` to Pages.
+
+Important GitHub Pages limitation: GitHub Pages only serves static assets. The
+upload, ingestion, OCR, and review-memory features still require the Express API
+to be running elsewhere, such as the Netlify Functions deployment or a separate
+Node server. The frontend can be pointed at that backend by setting
+`localStorage["acquisitionclaw.apiOrigin"]` to the API origin.
+
 Relevant deployment files:
 
 - [netlify.toml](/Users/tatoenahaisi/Downloads/AcquisitionClaw/netlify.toml)
 - [netlify/functions/api.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/netlify/functions/api.js)
 - [scripts/buildNetlifySite.js](/Users/tatoenahaisi/Downloads/AcquisitionClaw/scripts/buildNetlifySite.js)
+- [.github/workflows/pages.yml](/Users/tatoenahaisi/Downloads/AcquisitionClaw/.github/workflows/pages.yml)
 
 ## What The App Does
 
