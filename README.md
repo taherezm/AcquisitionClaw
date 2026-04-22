@@ -1,5 +1,5 @@
 # AcquisitionClaw
-
+https://taherezm.github.io/AcquisitionClaw/
 AcquisitionClaw is a buy-side acquisition analysis app for search-fund and small-cap deal workflows. It ingests messy seller files, normalizes them into a structured financial model, ranks conflicting evidence across documents, and turns that into diligence-oriented scoring, charts, recommendations, and review workflows.
 
 ## Current Product Shape
